@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local data — DO NOT COMMIT chat history
+ai-chat-archive/
+*.json
+!package.json
+!package-lock.json
+
+# Logs
+*.log
