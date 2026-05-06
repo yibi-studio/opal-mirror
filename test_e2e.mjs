@@ -6,12 +6,11 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(os.homedir(), 'ai-chat-archive');
+const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive');
 const SYNC = path.join(__dirname, 'sync.mjs');
 
 const results = [];

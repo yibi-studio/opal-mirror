@@ -67,7 +67,7 @@ node build_index.mjs
 node test_e2e.mjs
 ```
 
-输出默认在 `~/ai-chat-archive/`。改路径：
+输出默认在脚本同级的 `ai-chat-archive/`（自包含项目目录）。改路径：
 
 ```bash
 AI_CHAT_ARCHIVE_DIR=/path/to/archive node sync.mjs
@@ -82,7 +82,7 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 ## 输出结构
 
 ```
-~/ai-chat-archive/
+<repo>/ai-chat-archive/      # 默认与脚本同级，可被 AI_CHAT_ARCHIVE_DIR 覆盖
 ├── INDEX.md              # 可读索引（build_index.mjs 生成）
 ├── claude/{uuid}.json
 ├── chatgpt/{conversation_id}.json

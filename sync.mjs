@@ -3,15 +3,17 @@
 // from your already-logged-in Chrome via a CDP proxy.
 //
 // Usage: node sync.mjs [all|claude|chatgpt|gemini]
-// Env:   AI_CHAT_ARCHIVE_DIR  output directory (default: ~/ai-chat-archive)
-//        CDP_PROXY            CDP proxy URL (default: http://localhost:3456)
+// Env:   AI_CHAT_ARCHIVE_DIR  output directory (default: <script-dir>/ai-chat-archive)
+//        CDP_PROXY            CDP proxy URL    (default: http://localhost:3456)
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = process.env.CDP_PROXY || 'http://localhost:3456';
-const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(os.homedir(), 'ai-chat-archive');
+// Default: data dir co-located with the script. Override via AI_CHAT_ARCHIVE_DIR.
+const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive');
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`chat-history-sync — sync Claude / ChatGPT / Gemini history from Chrome.
