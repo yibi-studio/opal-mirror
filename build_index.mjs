@@ -6,9 +6,10 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(os.homedir(), 'ai-chat-archive');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive');
 
 async function listJSON(dir) {
   try {
