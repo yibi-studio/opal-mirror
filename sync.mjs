@@ -19,7 +19,9 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`chat-history-sync — sync Claude / ChatGPT / Gemini history from Chrome.
 
 Usage:
-  node sync.mjs [target]     target = all | claude | chatgpt | gemini  (default: all)
+  node sync.mjs [target] [--no-index]
+    target = all | claude | chatgpt | gemini  (default: all)
+    --no-index   skip auto-rebuild of INDEX.md after sync
 
 Environment:
   AI_CHAT_ARCHIVE_DIR        output dir  (current: ${ROOT})
@@ -29,12 +31,25 @@ Prereqs:
   1. Chrome running with --remote-debugging-port=9222
   2. CDP proxy server running on \${CDP_PROXY}
   3. You logged into claude.ai / chatgpt.com / gemini.google.com in that Chrome
+
+  Run \`node doctor.mjs\` to verify all of the above.
 `);
   process.exit(0);
 }
 
 async function listTargets() {
-  const r = await fetch(`${PROXY}/targets`);
+  let r;
+  try {
+    r = await fetch(`${PROXY}/targets`, { signal: AbortSignal.timeout(3000) });
+  } catch (e) {
+    console.error(`\n✗ Cannot reach CDP proxy at ${PROXY}`);
+    console.error(`  Reason: ${e.message}`);
+    console.error(`\nFix:`);
+    console.error(`  1. Make sure Chrome is running with --remote-debugging-port=9222`);
+    console.error(`  2. Make sure your CDP→HTTP proxy is up on ${PROXY}`);
+    console.error(`  3. Run \`node doctor.mjs\` to diagnose\n`);
+    process.exit(2);
+  }
   return r.json();
 }
 
@@ -256,7 +271,10 @@ async function syncGemini() {
 }
 
 // ---------- Main ----------
-const which = process.argv[2] || 'all';
+const args = process.argv.slice(2);
+const noIndex = args.includes('--no-index');
+const which = args.find(a => !a.startsWith('-')) || 'all';
+
 const result = {};
 try {
   if (which === 'all' || which === 'claude') result.claude = await syncClaude();
@@ -267,6 +285,17 @@ try {
 try {
   if (which === 'all' || which === 'gemini') result.gemini = await syncGemini();
 } catch (e) { console.error('[gemini] FAILED:', e.message); result.gemini = -1; }
+
+// Auto-rebuild INDEX.md if anything was actually saved (skip on --no-index).
+const totalSaved = Object.values(result).reduce((s, n) => s + (n > 0 ? n : 0), 0);
+if (totalSaved > 0 && !noIndex) {
+  console.log(`\n[index] rebuilding INDEX.md (${totalSaved} new conversation(s))...`);
+  const { spawn } = await import('node:child_process');
+  await new Promise((resolve) => {
+    const p = spawn('node', [path.join(__dirname, 'build_index.mjs')], { stdio: 'inherit' });
+    p.on('close', resolve);
+  });
+}
 
 console.log('\n=== SUMMARY ===');
 console.log(`output dir: ${ROOT}`);
