@@ -1,6 +1,6 @@
 {
   "name": "chat-history-sync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Sync Claude / ChatGPT / Gemini chat history to local JSON via Chrome DevTools Protocol",
   "type": "module",
   "scripts": {
@@ -9,8 +9,9 @@
     "sync:claude": "node sync.mjs claude",
     "sync:chatgpt": "node sync.mjs chatgpt",
     "sync:gemini": "node sync.mjs gemini",
+    "export:pixel": "node export_pixel_distill.mjs",
     "index": "node build_index.mjs",
-    "test": "node test_e2e.mjs"
+    "test": "node test_e2e.mjs && node test_pixel_export.mjs"
   },
   "engines": {
     "node": ">=18"

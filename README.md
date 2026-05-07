@@ -93,6 +93,9 @@ node sync.mjs gemini
 # 生成可读的索引表（sync 后会自动跑，单独触发用这个）
 node build_index.mjs
 
+# 导出为 Pixel Distill / OPAL Capture 可读取的 custom agent logs
+node export_pixel_distill.mjs --clean
+
 # 跑测试套件
 node test_e2e.mjs
 
@@ -119,7 +122,10 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 ├── INDEX.md              # 可读索引（build_index.mjs 生成）
 ├── claude/{uuid}.json
 ├── chatgpt/{conversation_id}.json
-└── gemini/{id}.json
+├── gemini/{id}.json
+└── pixel-distill-agent/  # export_pixel_distill.mjs 生成，gitignored
+    ├── manifest.json
+    └── sessions/*.jsonl
 ```
 
 每家的 schema：
@@ -171,6 +177,56 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
     { "role": "model", "text": "..." }
   ]
 }
+```
+
+## 接入 Pixel Distill / OPAL Capture
+
+Pixel Distill 已经支持从 `AGENT_LOG_ROOTS` 导入本地自定义 Agent 日志。本仓库不改 Pixel Distill 的 input format，而是把 web chat archive 转成它现有的 OpenClaw/Codex-style session JSONL：
+
+```bash
+cd "/Users/va7/Desktop/0506 webchat-sync"
+node export_pixel_distill.mjs --clean
+```
+
+默认输出：
+
+```text
+ai-chat-archive/pixel-distill-agent/
+└── sessions/
+    ├── webchat:claude:<uuid>.jsonl
+    ├── webchat:chatgpt:<conversation_id>.jsonl
+    └── webchat:gemini:<id>.jsonl
+```
+
+把输出目录追加到 Pixel Distill：
+
+```bash
+AGENT_LOG_ROOTS="/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent"
+```
+
+或通过 Pixel Distill 的 onboarding API 写入：
+
+```http
+POST /api/onboarding/agent-config
+{"append_agent_root":"/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent"}
+```
+
+验证 Pixel Distill 能读取：
+
+```bash
+cd "/Users/va7/Desktop/0423 像素级蒸馏"
+AGENT_LOG_ROOTS="/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent" \
+  .venv/bin/python - <<'PY'
+from src.ingest.agents.local import iter_local_agent_sessions
+print(sum(1 for _ in iter_local_agent_sessions(kinds={"custom_agent"})))
+PY
+```
+
+然后按 Pixel Distill 原流程从 raw sources 构建 episodes：
+
+```bash
+cd "/Users/va7/Desktop/0423 像素级蒸馏"
+.venv/bin/python -m scripts.build_episodes --from-raw --all-history
 ```
 
 ## 增量同步
