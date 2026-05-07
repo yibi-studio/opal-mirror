@@ -1,4 +1,8 @@
-# chat-history-sync
+# opal-mirror
+
+> Part of [**OPAL**](https://github.com/1va7/opal) (**O**pen **P**ortable **A**ctivity **L**ayer) — the web LLM chat history mirror subsystem.
+>
+> 内部代号 `chat-history-sync`。
 
 把 Claude / ChatGPT / Gemini 网页端的历史对话同步到本地 JSON 备份。
 
