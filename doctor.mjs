@@ -57,6 +57,24 @@ if (targets) {
       match: t => t.url.startsWith('https://gemini.google.com'),
       probe: tid => `JSON.stringify({ok:document.querySelectorAll("conversations-list a[href*='/app/']").length>=0,convos:document.querySelectorAll("conversations-list a[href*='/app/']").length})`,
     },
+    {
+      key: 'deepseek',
+      name: 'DeepSeek (chat.deepseek.com)',
+      match: t => t.url.startsWith('https://chat.deepseek.com'),
+      probe: tid => `(()=>{try{const tk=JSON.parse(localStorage.getItem("userToken"))?.value;return JSON.stringify({ok:!!tk,token_prefix:tk?tk.slice(0,8):""})}catch(e){return JSON.stringify({ok:false})}})()`,
+    },
+    {
+      key: 'doubao',
+      name: '豆包 (www.doubao.com)',
+      match: t => t.url.startsWith('https://www.doubao.com'),
+      probe: tid => `fetch("/samantha/thread/list?aid=497858",{method:"POST",credentials:"include",headers:{"content-type":"application/json"},body:'{"count":1}'}).then(r=>r.json()).then(d=>JSON.stringify({ok:d.code===0,threads:(d.data&&d.data.thread_list||[]).length}))`,
+    },
+    {
+      key: 'qwen',
+      name: '千问 (www.qianwen.com)',
+      match: t => t.url.startsWith('https://www.qianwen.com') || t.url.startsWith('https://qianwen.com'),
+      probe: tid => `(()=>{const ut=localStorage.getItem("qianwen-uniq-id");return JSON.stringify({ok:!!ut,ut_prefix:ut?ut.slice(0,8):""})})()`,
+    },
   ];
 
   for (const m of matchers) {
@@ -91,13 +109,13 @@ const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-ar
     if (stat.isDirectory()) {
       const dirs = await fs.readdir(ROOT);
       const counts = {};
-      for (const p of ['claude','chatgpt','gemini']) {
+      for (const p of ['claude','chatgpt','gemini','deepseek','doubao','qwen']) {
         try {
           const files = await fs.readdir(path.join(ROOT, p));
           counts[p] = files.filter(f => f.endsWith('.json')).length;
         } catch { counts[p] = 0; }
       }
-      ok('archive dir', `${ROOT} (claude=${counts.claude}, chatgpt=${counts.chatgpt}, gemini=${counts.gemini})`);
+      ok('archive dir', `${ROOT} (${Object.entries(counts).map(([k,v])=>`${k}=${v}`).join(', ')})`);
     }
   } catch {
     warn('archive dir', `${ROOT} doesn't exist yet — will be created on first sync`);

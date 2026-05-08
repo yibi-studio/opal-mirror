@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// chat-history-sync — pulls Claude / ChatGPT / Gemini conversation history
-// from your already-logged-in Chrome via a CDP proxy.
+// chat-history-sync — pulls Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen
+// conversation history from your already-logged-in Chrome via a CDP proxy.
 //
-// Usage: node sync.mjs [all|claude|chatgpt|gemini]
+// Usage: node sync.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen]
 // Env:   AI_CHAT_ARCHIVE_DIR  output directory (default: <script-dir>/ai-chat-archive)
 //        CDP_PROXY            CDP proxy URL    (default: http://localhost:3456)
 
@@ -20,7 +20,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 
 Usage:
   node sync.mjs [target] [--no-index]
-    target = all | claude | chatgpt | gemini  (default: all)
+    target = all | claude | chatgpt | gemini | deepseek | doubao | qwen  (default: all)
     --no-index   skip auto-rebuild of INDEX.md after sync
 
 Environment:
@@ -30,7 +30,7 @@ Environment:
 Prereqs:
   1. Chrome running with --remote-debugging-port=9222
   2. CDP proxy server running on \${CDP_PROXY}
-  3. You logged into claude.ai / chatgpt.com / gemini.google.com in that Chrome
+  3. You logged into claude.ai / chatgpt.com / gemini.google.com / chat.deepseek.com / www.doubao.com / www.qianwen.com in that Chrome
 
   Run \`node doctor.mjs\` to verify all of the above.
 `);
@@ -75,6 +75,278 @@ async function openTab(url) {
 async function writeJSON(file, data) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
+
+// ---------- DeepSeek ----------
+// chat.deepseek.com — token from localStorage('userToken'), Bearer auth.
+// list:   GET /api/v0/chat_session/fetch_page?count=50&seq_id=<last>
+// detail: GET /api/v0/chat/history_messages?chat_session_id=<id>
+// 注意: list 端点的 seq_id 分页有时返回相同条目，要用 seen_ids 去重。
+async function syncDeepSeek() {
+  const t = await findTarget(x => x.url.startsWith('https://chat.deepseek.com'));
+  if (!t) throw new Error('no chat.deepseek.com tab open — log into chat.deepseek.com in Chrome first');
+  console.log(`[deepseek] using tab ${t.targetId}`);
+
+  const tokenRaw = await evalIn(t.targetId,
+    `(()=>{try{return JSON.parse(localStorage.getItem("userToken"))?.value||""}catch(e){return ""}})()`);
+  if (!tokenRaw) {
+    console.log('[deepseek] no userToken in localStorage — sign in to chat.deepseek.com first');
+    return 0;
+  }
+  console.log(`[deepseek] token ok (${tokenRaw.slice(0,8)}...)`);
+
+  // 1. list sessions, dedupe by id
+  const seen = new Set();
+  const sessions = [];
+  let seqId = null, page = 0, emptyPages = 0;
+  while (page < 200) {
+    const params = `count=50${seqId ? `&seq_id=${seqId}` : ''}`;
+    const raw = await evalIn(t.targetId,
+      `fetch("/api/v0/chat_session/fetch_page?${params}",{headers:{"Authorization":"Bearer ${tokenRaw}"},credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d))`);
+    const j = JSON.parse(raw);
+    const data = j?.data?.biz_data || {};
+    const batch = data.chat_sessions || [];
+    if (batch.length === 0) break;
+
+    const fresh = batch.filter(s => !seen.has(s.id));
+    fresh.forEach(s => seen.add(s.id));
+    sessions.push(...fresh);
+
+    page++;
+    seqId = batch[batch.length - 1].seq_id;
+    if (fresh.length === 0) {
+      if (++emptyPages >= 3) break;
+    } else emptyPages = 0;
+    if (!data.has_more) break;
+  }
+  console.log(`[deepseek] ${sessions.length} unique sessions`);
+
+  // 2. fetch each session's messages
+  let total = 0, skipped = 0;
+  for (const s of sessions) {
+    const file = path.join(ROOT, 'deepseek', `${s.id}.json`);
+    try {
+      const existing = JSON.parse(await fs.readFile(file, 'utf8'));
+      if (existing.updated_at === s.updated_at) { skipped++; continue; }
+    } catch {}
+
+    const raw = await evalIn(t.targetId,
+      `fetch("/api/v0/chat/history_messages?chat_session_id=${s.id}",{headers:{"Authorization":"Bearer ${tokenRaw}"},credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d))`);
+    const j = JSON.parse(raw);
+    const detail = j?.data?.biz_data || {};
+    const record = {
+      id: s.id,
+      title: s.title || '',
+      title_type: s.title_type,
+      inserted_at: s.inserted_at,
+      updated_at: s.updated_at,
+      model_type: s.model_type,
+      agent: s.agent,
+      version: s.version,
+      chat_session: detail.chat_session || s,
+      chat_messages: detail.chat_messages || [],
+    };
+    await writeJSON(file, record);
+    total++;
+    process.stdout.write(`  + ${(s.title||s.id).slice(0,50)} (${record.chat_messages.length} msgs)\n`);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  console.log(`[deepseek] saved ${total} new, skipped ${skipped} unchanged`);
+  return total;
+}
+
+// ---------- 豆包 (Doubao) ----------
+// www.doubao.com — cookies (incl. HttpOnly sessionid) auto-sent by browser.
+// list:   POST /samantha/thread/list  → {data: {thread_list, has_more}}
+// detail: POST /im/chain/single  cmd=3100, anchor_index=MAX_SAFE_INTEGER, direction=1
+async function syncDoubao() {
+  const t = await findTarget(x => x.url.startsWith('https://www.doubao.com'));
+  if (!t) throw new Error('no www.doubao.com tab open — log into www.doubao.com in Chrome first');
+  console.log(`[doubao] using tab ${t.targetId}`);
+
+  // common params豆包所有内部 API 都需要的查询字符串
+  const COMMON = `version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&samantha_web=1&use-olympus-account=1`;
+
+  // 1. list threads (按需分页，目前只看到 has_more 字段)
+  const threads = [];
+  let cursor = null, pageNum = 0;
+  while (pageNum < 50) {
+    const bodyJson = JSON.stringify(cursor ? { count: 50, cursor } : { count: 50 });
+    const raw = await evalIn(t.targetId, `
+      fetch("/samantha/thread/list?${COMMON}",{
+        method:"POST",
+        credentials:"include",
+        headers:{"content-type":"application/json","agw-js-conv":"str"},
+        body: ${JSON.stringify(bodyJson)}
+      }).then(r=>r.json()).then(d=>JSON.stringify(d))
+    `.trim());
+    const j = JSON.parse(raw);
+    const data = j?.data || {};
+    const batch = data.thread_list || [];
+    if (batch.length === 0) break;
+    threads.push(...batch);
+    pageNum++;
+    if (!data.has_more) break;
+    // cursor 字段名待确认，简单先用 thread_id_str
+    cursor = batch[batch.length - 1]?.thread_id_str || batch[batch.length - 1]?.thread_id;
+  }
+  console.log(`[doubao] ${threads.length} thread(s)`);
+
+  // 2. fetch each thread's messages (paginated by anchor_index)
+  let total = 0, skipped = 0;
+  for (const th of threads) {
+    const conv = th.conversation || {};
+    const cid = conv.conversation_id;
+    const ctype = conv.conversation_type ?? 3;
+    if (!cid) continue;
+
+    const file = path.join(ROOT, 'doubao', `${cid}.json`);
+    try {
+      const existing = JSON.parse(await fs.readFile(file, 'utf8'));
+      if (existing.update_time === conv.update_time) { skipped++; continue; }
+    } catch {}
+
+    // 翻页拉所有消息
+    const allMsgs = [];
+    const seenMsg = new Set();
+    let anchor = 9007199254740991;  // Number.MAX_SAFE_INTEGER
+    while (true) {
+      const bodyJson = JSON.stringify({
+        cmd: 3100,
+        uplink_body: {
+          pull_singe_chain_uplink_body: {
+            conversation_id: cid,
+            anchor_index: anchor,
+            conversation_type: ctype,
+            direction: 1,
+            limit: 50,
+            ext: {},
+            filter: { index_list: [] },
+          }
+        },
+        sequence_id: `${cid}-${anchor}`,
+        channel: 2,
+        version: "1",
+      });
+      const raw = await evalIn(t.targetId, `
+        fetch("/im/chain/single?${COMMON}",{
+          method:"POST",
+          credentials:"include",
+          headers:{"content-type":"application/json; encoding=utf-8","agw-js-conv":"str"},
+          body: ${JSON.stringify(bodyJson)}
+        }).then(r=>r.json()).then(d=>JSON.stringify(d))
+      `.trim());
+      const j = JSON.parse(raw);
+      const msgs = j?.downlink_body?.pull_singe_chain_downlink_body?.messages || [];
+      if (msgs.length === 0) break;
+      const fresh = msgs.filter(m => !seenMsg.has(m.message_id));
+      if (fresh.length === 0) break;
+      fresh.forEach(m => seenMsg.add(m.message_id));
+      allMsgs.push(...fresh);
+      // 下一页 anchor = 本批最小 index_in_conv
+      const indices = fresh.map(m => Number(m.index_in_conv || 0)).filter(n => n > 0);
+      if (indices.length === 0) break;
+      const minIdx = Math.min(...indices);
+      if (minIdx <= 1) break;
+      anchor = minIdx;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    // 时间正序
+    allMsgs.sort((a, b) => Number(a.index_in_conv || 0) - Number(b.index_in_conv || 0));
+
+    const record = {
+      thread_id: th.thread_id_str || th.thread_id,
+      conversation_id: cid,
+      conversation_type: ctype,
+      name: conv.name || '',
+      bot_id: conv.bot_id,
+      update_time: conv.update_time,
+      message_index: conv.message_index,
+      messages: allMsgs,
+    };
+    await writeJSON(file, record);
+    total++;
+    process.stdout.write(`  + ${(conv.name || cid).slice(0,50)} (${allMsgs.length} msgs)\n`);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  console.log(`[doubao] saved ${total} new, skipped ${skipped} unchanged`);
+  return total;
+}
+
+// ---------- 千问 (Qwen) ----------
+// www.qianwen.com — API 在跨域子域 chat2-api.qianwen.com 上
+// list:   GET /api/v1/session/list?...&ut=<localStorage.qianwen-uniq-id>
+// detail: GET /api/v1/session/msg/list?...&session_id=X&page_size=50&page=N
+async function syncQwen() {
+  const t = await findTarget(x => x.url.startsWith('https://www.qianwen.com') || x.url.startsWith('https://qianwen.com'));
+  if (!t) throw new Error('no www.qianwen.com tab open — log into www.qianwen.com in Chrome first');
+  console.log(`[qwen] using tab ${t.targetId}`);
+
+  const ut = await evalIn(t.targetId, `localStorage.getItem('qianwen-uniq-id') || ''`);
+  if (!ut) {
+    console.log('[qwen] qianwen-uniq-id missing in localStorage — sign in to www.qianwen.com first');
+    return 0;
+  }
+  console.log(`[qwen] ut=${ut.slice(0,8)}...`);
+
+  const API = 'https://chat2-api.qianwen.com';
+  const COMMON = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${ut}`;
+
+  // 1. 列出所有 sessions
+  const sessions = [];
+  let pageNum = 1;
+  while (pageNum < 100) {
+    const raw = await evalIn(t.targetId,
+      `fetch("${API}/api/v1/session/list?${COMMON}&page_size=50&page=${pageNum}",{credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d))`);
+    const j = JSON.parse(raw);
+    const batch = j?.data?.list || [];
+    if (batch.length === 0) break;
+    sessions.push(...batch);
+    if (!j.data.have_next_page) break;
+    pageNum++;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  console.log(`[qwen] ${sessions.length} session(s)`);
+
+  // 2. 逐 session 拉消息记录
+  let total = 0, skipped = 0;
+  for (const s of sessions) {
+    const sid = s.session_id;
+    const file = path.join(ROOT, 'qwen', `${sid}.json`);
+    try {
+      const existing = JSON.parse(await fs.readFile(file, 'utf8'));
+      if (existing.updated_at === s.updated_at) { skipped++; continue; }
+    } catch {}
+
+    const records = [];
+    let mp = 1;
+    while (mp < 50) {
+      const raw = await evalIn(t.targetId,
+        `fetch("${API}/api/v1/session/msg/list?${COMMON}&session_id=${sid}&page_size=50&page=${mp}&return_response_messages=true&event_filter=all&forward=false&include_pos=false",{credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d))`);
+      const j = JSON.parse(raw);
+      const batch = j?.data?.list || j?.data || [];
+      const arr = Array.isArray(batch) ? batch : [];
+      if (arr.length === 0) break;
+      records.push(...arr);
+      if (arr.length < 50) break;
+      mp++;
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    await writeJSON(file, {
+      session_id: sid,
+      title: s.title || '',
+      created_at: s.created_at,
+      updated_at: s.updated_at,
+      type: s.type,
+      records,
+    });
+    total++;
+    process.stdout.write(`  + ${(s.title || sid).slice(0,50)} (${records.length} records)\n`);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  console.log(`[qwen] saved ${total} new, skipped ${skipped} unchanged`);
+  return total;
 }
 
 // ---------- Claude ----------
@@ -285,6 +557,15 @@ try {
 try {
   if (which === 'all' || which === 'gemini') result.gemini = await syncGemini();
 } catch (e) { console.error('[gemini] FAILED:', e.message); result.gemini = -1; }
+try {
+  if (which === 'all' || which === 'deepseek') result.deepseek = await syncDeepSeek();
+} catch (e) { console.error('[deepseek] FAILED:', e.message); result.deepseek = -1; }
+try {
+  if (which === 'all' || which === 'doubao') result.doubao = await syncDoubao();
+} catch (e) { console.error('[doubao] FAILED:', e.message); result.doubao = -1; }
+try {
+  if (which === 'all' || which === 'qwen') result.qwen = await syncQwen();
+} catch (e) { console.error('[qwen] FAILED:', e.message); result.qwen = -1; }
 
 // Auto-rebuild INDEX.md if anything was actually saved (skip on --no-index).
 const totalSaved = Object.values(result).reduce((s, n) => s + (n > 0 ? n : 0), 0);
