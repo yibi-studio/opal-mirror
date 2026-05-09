@@ -79,9 +79,9 @@ async function writeJSON(file, data) {
 
 // ---------- DeepSeek ----------
 // chat.deepseek.com — token from localStorage('userToken'), Bearer auth.
-// list:   GET /api/v0/chat_session/fetch_page?count=50&seq_id=<last>
+// list:   GET /api/v0/chat_session/fetch_page?count=50&before_seq_id=<last>
 // detail: GET /api/v0/chat/history_messages?chat_session_id=<id>
-// 注意: list 端点的 seq_id 分页有时返回相同条目，要用 seen_ids 去重。
+// 注意: 分页参数是 before_seq_id (不是 seq_id — seq_id 会被忽略导致每页都返回第一页)。
 async function syncDeepSeek() {
   const t = await findTarget(x => x.url.startsWith('https://chat.deepseek.com'));
   if (!t) throw new Error('no chat.deepseek.com tab open — log into chat.deepseek.com in Chrome first');
@@ -95,12 +95,12 @@ async function syncDeepSeek() {
   }
   console.log(`[deepseek] token ok (${tokenRaw.slice(0,8)}...)`);
 
-  // 1. list sessions, dedupe by id
+  // 1. list sessions, dedupe by id (defensive)
   const seen = new Set();
   const sessions = [];
-  let seqId = null, page = 0, emptyPages = 0;
+  let beforeSeq = null, page = 0;
   while (page < 200) {
-    const params = `count=50${seqId ? `&seq_id=${seqId}` : ''}`;
+    const params = `count=50${beforeSeq ? `&before_seq_id=${beforeSeq}` : ''}`;
     const raw = await evalIn(t.targetId,
       `fetch("/api/v0/chat_session/fetch_page?${params}",{headers:{"Authorization":"Bearer ${tokenRaw}"},credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d))`);
     const j = JSON.parse(raw);
@@ -113,10 +113,7 @@ async function syncDeepSeek() {
     sessions.push(...fresh);
 
     page++;
-    seqId = batch[batch.length - 1].seq_id;
-    if (fresh.length === 0) {
-      if (++emptyPages >= 3) break;
-    } else emptyPages = 0;
+    beforeSeq = batch[batch.length - 1].seq_id;
     if (!data.has_more) break;
   }
   console.log(`[deepseek] ${sessions.length} unique sessions`);
