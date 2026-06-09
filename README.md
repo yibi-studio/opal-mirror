@@ -105,6 +105,9 @@ node build_index.mjs
 # 导出为 Pixel Distill / OPAL Capture 可读取的 custom agent logs
 node export_pixel_distill.mjs --clean
 
+# 导入到 terminal Codex 的 /resume 列表
+node export_codex.mjs chatgpt --codex-home ~/.codex
+
 # 跑测试套件
 node test_e2e.mjs
 
@@ -247,7 +250,7 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 Pixel Distill 已经支持从 `AGENT_LOG_ROOTS` 导入本地自定义 Agent 日志。本仓库不改 Pixel Distill 的 input format，而是把 web chat archive 转成它现有的 OpenClaw/Codex-style session JSONL：
 
 ```bash
-cd "/Users/va7/Desktop/0506 webchat-sync"
+cd "/path/to/opal-mirror"
 node export_pixel_distill.mjs --clean
 ```
 
@@ -264,21 +267,21 @@ ai-chat-archive/pixel-distill-agent/
 把输出目录追加到 Pixel Distill：
 
 ```bash
-AGENT_LOG_ROOTS="/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent"
+AGENT_LOG_ROOTS="/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent"
 ```
 
 或通过 Pixel Distill 的 onboarding API 写入：
 
 ```http
 POST /api/onboarding/agent-config
-{"append_agent_root":"/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent"}
+{"append_agent_root":"/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent"}
 ```
 
 验证 Pixel Distill 能读取：
 
 ```bash
-cd "/Users/va7/Desktop/0423 像素级蒸馏"
-AGENT_LOG_ROOTS="/Users/va7/Desktop/0506 webchat-sync/ai-chat-archive/pixel-distill-agent" \
+cd "/path/to/pixel-distill"
+AGENT_LOG_ROOTS="/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent" \
   .venv/bin/python - <<'PY'
 from src.ingest.agents.local import iter_local_agent_sessions
 print(sum(1 for _ in iter_local_agent_sessions(kinds={"custom_agent"})))
@@ -288,8 +291,47 @@ PY
 然后按 Pixel Distill 原流程从 raw sources 构建 episodes：
 
 ```bash
-cd "/Users/va7/Desktop/0423 像素级蒸馏"
+cd "/path/to/pixel-distill"
 .venv/bin/python -m scripts.build_episodes --from-raw --all-history
+```
+
+## 导入 terminal Codex /resume
+
+`export_codex.mjs` 会把 web chat archive 转成 Codex TUI 能直接 `/resume` 的本地 session：
+
+```bash
+# 建议先退出正在运行的 terminal Codex，再导入
+node export_codex.mjs all --archive ./ai-chat-archive --codex-home ~/.codex --cwd ~
+
+# 只导入 ChatGPT
+node export_codex.mjs chatgpt --codex-home ~/.codex --cwd ~
+
+# 测试输出，不写 SQLite state
+node export_codex.mjs chatgpt --codex-home /tmp/codex-test --no-state
+```
+
+它会写入：
+
+```text
+~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+~/.codex/state_5.sqlite
+~/.codex/session_index.jsonl
+~/.codex/history.jsonl
+```
+
+这里有几个和 `/resume` 兼容相关的细节：
+
+- `/resume` 主要读 `state_5.sqlite` 的 `threads` 表；只放 JSONL 文件不够。
+- transcript 里同时写 `event_msg.user_message`、`event_msg.agent_message` 和 `response_item`，所以进入 session 后能看到用户消息和模型回复。
+- SQLite 的 `created_at_ms/updated_at_ms`、rollout JSONL 的 timestamp、文件 mtime 都用 web chat 原始发生时间；导入后不会按“刚刚导入”的时间堆到列表最前面。
+- 重复运行是幂等的：SQLite 用同一个 thread id 更新，legacy `session_index.jsonl/history.jsonl` 会替换旧行。
+- 导入前会给 `state_5.sqlite` 写一份 `state_5.sqlite.backup-before-opal-mirror-import-*` 备份。
+
+导入后可检查：
+
+```bash
+sqlite3 ~/.codex/state_5.sqlite \
+  "select title, datetime(updated_at_ms/1000, 'unixepoch'), rollout_path from threads where title like '[webchat:%' order by updated_at_ms desc limit 5;"
 ```
 
 ## 增量同步
@@ -314,6 +356,15 @@ cd "/Users/va7/Desktop/0423 像素级蒸馏"
 
 ## 测试
 
+```bash
+npm test
+npm run test:e2e
+npm run test:pixel
+npm run test:all
+```
+
+默认 `npm test` 只跑不依赖真实聊天归档的 Codex 导入测试。`test:e2e` / `test:pixel` / `test:all` 需要当前机器上有实际 archive、Pixel export 或可用 CDP 登录态。
+
 `test_e2e.mjs` 跑 7 组测试 / 15 个用例：
 
 - T1 — JSON 文件可解析
@@ -323,6 +374,13 @@ cd "/Users/va7/Desktop/0423 像素级蒸馏"
 - T5 — 中文/CJK 标题无乱码
 - T6 — Gemini 对话顺序 user/model 正确交替
 - T7 — 增量同步：重跑 Claude 应保存 0 个新会话
+
+`test_codex_export.mjs` 用临时 archive 验证 Codex 导入：
+
+- rollout JSONL 包含可见的 user / assistant transcript 事件
+- 文件 mtime 和 SQLite `updated_at_ms` 使用 web chat 原始时间
+- `state_5.sqlite` threads 注册可被 `/resume` 发现
+- 重复导入不会重复追加 legacy index
 
 ## 添加新平台
 

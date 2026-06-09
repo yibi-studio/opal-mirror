@@ -13,8 +13,12 @@
     "sync:doubao": "node sync.mjs doubao",
     "sync:qwen": "node sync.mjs qwen",
     "export:pixel": "node export_pixel_distill.mjs",
+    "export:codex": "node export_codex.mjs",
     "index": "node build_index.mjs",
-    "test": "node test_e2e.mjs && node test_pixel_export.mjs"
+    "test": "node test_codex_export.mjs",
+    "test:e2e": "node test_e2e.mjs",
+    "test:pixel": "node test_pixel_export.mjs",
+    "test:all": "node test_e2e.mjs && node test_pixel_export.mjs && node test_codex_export.mjs"
   },
   "engines": {
     "node": ">=18"
