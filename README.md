@@ -1,7 +1,5 @@
 # opal-mirror
 
-> Part of [**OPAL**](https://github.com/1va7/opal) (**O**pen **P**ortable **A**ctivity **L**ayer) — the web LLM chat history mirror subsystem.
-
 把 Claude / ChatGPT / Gemini / DeepSeek / 豆包 / 千问 网页端的历史对话同步到本地 JSON 备份。
 
 不依赖第三方服务、不导出 cookie、不暴露 token——通过 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) 让你**已经登录的 Chrome 标签页自己调它后端的 API**，结果回传到本地。
@@ -100,9 +98,6 @@ node sync.mjs qwen
 # 生成可读的索引表（sync 后会自动跑，单独触发用这个）
 node build_index.mjs
 
-# 导出为 Pixel Distill / OPAL Capture 可读取的 custom agent logs
-node export_pixel_distill.mjs --clean
-
 # 导入到 terminal Codex 的 /resume 列表
 node export_codex.mjs chatgpt --codex-home ~/.codex
 
@@ -130,7 +125,7 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 - 本仓库不要求手动复制 cookie、token 或浏览器配置文件。
 - 所有站点请求都在你已经登录的 Chrome 页面上下文中执行；脚本只接收站点 API 返回的聊天 JSON。
 - 默认输出目录 `ai-chat-archive/` 已被 `.gitignore` 排除，不会随代码提交。
-- 生成的 Pixel Distill / Codex 导出目录包含聊天内容，也默认位于 `ai-chat-archive/` 或你指定的本地目录；公开仓库前不要提交这些目录。
+- 生成的 Codex 导出目录包含聊天内容，也默认位于 `ai-chat-archive/` 或你指定的本地目录；公开仓库前不要提交这些目录。
 - `export_codex.mjs` 会写入你指定的本地 Codex home，例如 `~/.codex`；它不会上传这些本地 session。
 - 如果你要共享问题复现，请先脱敏 archive 样本里的标题、消息内容、URL、账号或组织信息。
 
@@ -145,9 +140,6 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 ├── deepseek/{session_id}.json
 ├── doubao/{conversation_id}.json
 ├── qwen/{session_id}.json
-└── pixel-distill-agent/  # export_pixel_distill.mjs 生成，gitignored
-    ├── manifest.json
-    └── sessions/*.jsonl
 ```
 
 每家的 schema：
@@ -252,56 +244,6 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 }
 ```
 
-## 接入 Pixel Distill / OPAL Capture
-
-Pixel Distill 已经支持从 `AGENT_LOG_ROOTS` 导入本地自定义 Agent 日志。本仓库不改 Pixel Distill 的 input format，而是把 web chat archive 转成它现有的 OpenClaw/Codex-style session JSONL：
-
-```bash
-cd "/path/to/opal-mirror"
-node export_pixel_distill.mjs --clean
-```
-
-默认输出：
-
-```text
-ai-chat-archive/pixel-distill-agent/
-└── sessions/
-    ├── webchat:claude:<uuid>.jsonl
-    ├── webchat:chatgpt:<conversation_id>.jsonl
-    └── webchat:gemini:<id>.jsonl
-```
-
-把输出目录追加到 Pixel Distill：
-
-```bash
-AGENT_LOG_ROOTS="/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent"
-```
-
-或通过 Pixel Distill 的 onboarding API 写入：
-
-```http
-POST /api/onboarding/agent-config
-{"append_agent_root":"/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent"}
-```
-
-验证 Pixel Distill 能读取：
-
-```bash
-cd "/path/to/pixel-distill"
-AGENT_LOG_ROOTS="/path/to/opal-mirror/ai-chat-archive/pixel-distill-agent" \
-  .venv/bin/python - <<'PY'
-from src.ingest.agents.local import iter_local_agent_sessions
-print(sum(1 for _ in iter_local_agent_sessions(kinds={"custom_agent"})))
-PY
-```
-
-然后按 Pixel Distill 原流程从 raw sources 构建 episodes：
-
-```bash
-cd "/path/to/pixel-distill"
-.venv/bin/python -m scripts.build_episodes --from-raw --all-history
-```
-
 ## 导入 terminal Codex /resume
 
 `export_codex.mjs` 会把 web chat archive 转成 Codex TUI 能直接 `/resume` 的本地 session：
@@ -366,11 +308,10 @@ sqlite3 ~/.codex/state_5.sqlite \
 ```bash
 npm test
 npm run test:e2e
-npm run test:pixel
 npm run test:all
 ```
 
-默认 `npm test` 只跑不依赖真实聊天归档的 Codex 导入测试。`test:e2e` / `test:pixel` / `test:all` 需要当前机器上有实际 archive、Pixel export 或可用 CDP 登录态。
+默认 `npm test` 只跑不依赖真实聊天归档的 Codex 导入测试。`test:e2e` / `test:all` 需要当前机器上有实际 archive 或可用 CDP 登录态。
 
 `test_e2e.mjs` 跑 7 组测试 / 15 个用例：
 
