@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// doctor.mjs — preflight check for chat-history-sync.
+// doctor.mjs — preflight check for opal-mirror.
 // Verifies: Node version, CDP proxy reachability, Chrome debugging port,
 // existing logged-in tabs, and login status per platform.
 
@@ -14,7 +14,7 @@ const ok = (name, msg='') => { checks.push({ name, ok: true, msg }); console.log
 const warn = (name, msg) => { checks.push({ name, ok: 'warn', msg }); console.log(`  ⚠ ${name} — ${msg}`); };
 const fail = (name, msg) => { checks.push({ name, ok: false, msg }); console.log(`  ✗ ${name} — ${msg}`); };
 
-console.log('chat-history-sync — preflight check\n');
+console.log('opal-mirror — preflight check\n');
 
 // 1. Node version
 {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// chat-history-sync — pulls Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen
+// opal-mirror — pulls Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen
 // conversation history from your already-logged-in Chrome via a CDP proxy.
 //
 // Usage: node sync.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen]
@@ -16,7 +16,7 @@ const PROXY = process.env.CDP_PROXY || 'http://localhost:3456';
 const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive');
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  console.log(`chat-history-sync — sync Claude / ChatGPT / Gemini history from Chrome.
+  console.log(`opal-mirror — sync Claude / ChatGPT / Gemini history from Chrome.
 
 Usage:
   node sync.mjs [target] [--no-index]

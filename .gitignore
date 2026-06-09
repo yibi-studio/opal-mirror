@@ -14,8 +14,25 @@ Thumbs.db
 # Local data — DO NOT COMMIT chat history
 ai-chat-archive/
 *.json
+*.jsonl
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
 !package.json
 !package-lock.json
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+auth.json
+cookies.txt
+hosts.yml
 
 # Logs
 *.log
