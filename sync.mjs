@@ -93,7 +93,7 @@ async function syncDeepSeek() {
     console.log('[deepseek] no userToken in localStorage — sign in to chat.deepseek.com first');
     return 0;
   }
-  console.log(`[deepseek] token ok (${tokenRaw.slice(0,8)}...)`);
+  console.log('[deepseek] token present');
 
   // 1. list sessions, dedupe by id (defensive)
   const seen = new Set();

@@ -61,7 +61,7 @@ if (targets) {
       key: 'deepseek',
       name: 'DeepSeek (chat.deepseek.com)',
       match: t => t.url.startsWith('https://chat.deepseek.com'),
-      probe: tid => `(()=>{try{const tk=JSON.parse(localStorage.getItem("userToken"))?.value;return JSON.stringify({ok:!!tk,token_prefix:tk?tk.slice(0,8):""})}catch(e){return JSON.stringify({ok:false})}})()`,
+      probe: tid => `(()=>{try{const tk=JSON.parse(localStorage.getItem("userToken"))?.value;return JSON.stringify({ok:!!tk})}catch(e){return JSON.stringify({ok:false})}})()`,
     },
     {
       key: 'doubao',

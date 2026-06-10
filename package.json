@@ -3,6 +3,9 @@
   "version": "0.3.0",
   "description": "Sync Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen chat history to local JSON via Chrome DevTools Protocol",
   "type": "module",
+  "bin": {
+    "opal-mirror": "./bin/opal-mirror.mjs"
+  },
   "scripts": {
     "doctor": "node doctor.mjs",
     "sync": "node sync.mjs",
