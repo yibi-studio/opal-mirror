@@ -17,9 +17,10 @@
     "sync:qwen": "node sync.mjs qwen",
     "export:codex": "node export_codex.mjs",
     "index": "node build_index.mjs",
-    "test": "node test_codex_export.mjs",
+    "test": "node test_codex_export.mjs && node test_doctor.mjs && node test_skill_product.mjs",
     "test:e2e": "node test_e2e.mjs",
-    "test:all": "node test_e2e.mjs && node test_codex_export.mjs"
+    "test:skill": "node test_skill_product.mjs",
+    "test:all": "node test_e2e.mjs && node test_codex_export.mjs && node test_doctor.mjs && node test_skill_product.mjs"
   },
   "engines": {
     "node": ">=18"

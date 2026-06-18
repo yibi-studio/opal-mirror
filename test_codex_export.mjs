@@ -126,6 +126,16 @@ function runExport(extraArgs = []) {
   ], { encoding: 'utf8' });
 }
 
+function runExportDefaultCwd(extraArgs = []) {
+  return spawnSync('node', [
+    EXPORT,
+    'all',
+    '--archive', archive,
+    '--codex-home', codexHome,
+    ...extraArgs,
+  ], { encoding: 'utf8' });
+}
+
 async function listRollouts() {
   const out = [];
   async function walk(dir) {
@@ -197,6 +207,8 @@ assert(first.status === 0, 'export command succeeds', first.stderr.trim() || fir
 
 const files = await listRollouts();
 assert(files.length === 6, 'rollout files written', `${files.length} sessions`);
+const metaRows = await Promise.all(files.map(async file => (await readJsonl(file))[0]));
+assert(metaRows.every(row => row?.payload?.cwd === cwd), 'explicit cwd preserved');
 
 let malformed = 0;
 let totalAgent = 0;
@@ -247,6 +259,16 @@ if (sqliteAvailable()) {
   const countAfterPrune = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select count(*) from threads where title like '[webchat:%';"], { encoding: 'utf8' });
   assert(countAfterPrune.stdout.trim() === '6', 'sqlite webchat count stable after prune', countAfterPrune.stdout.trim());
 }
+
+await fs.rm(path.join(codexHome, 'sessions'), { recursive: true, force: true });
+await fs.rm(path.join(codexHome, 'session_index.jsonl'), { force: true });
+await fs.rm(path.join(codexHome, 'history.jsonl'), { force: true });
+const defaultCwdExport = runExportDefaultCwd(['--no-state']);
+assert(defaultCwdExport.status === 0, 'default cwd export succeeds', defaultCwdExport.stderr.trim());
+const defaultFiles = await listRollouts();
+const defaultRows = await Promise.all(defaultFiles.map(async file => (await readJsonl(file))[0]));
+const expectedDefaultCwd = path.join(codexHome, 'webchat-imports');
+assert(defaultRows.length === 6 && defaultRows.every(row => row?.payload?.cwd === expectedDefaultCwd), 'default cwd is webchat-imports', expectedDefaultCwd);
 
 console.log('\n=== SUMMARY ===');
 const passed = results.filter(r => r.ok).length;

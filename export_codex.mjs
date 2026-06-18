@@ -19,22 +19,28 @@ const help = args.includes('--help') || args.includes('-h');
 const target = positionalArgs()[0] || 'all';
 const archiveRoot = path.resolve(readFlag('--archive') || process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive'));
 const codexHome = path.resolve(readFlag('--codex-home') || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
-const codexCwd = path.resolve(readFlag('--cwd') || process.env.CODEX_IMPORT_CWD || os.homedir());
+const codexCwd = path.resolve(readFlag('--cwd') || process.env.CODEX_IMPORT_CWD || path.join(codexHome, 'webchat-imports'));
 const noState = args.includes('--no-state');
 const noLegacyIndex = args.includes('--no-legacy-index');
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
+const importLimit = readPositiveIntFlag('--limit');
 
 if (help) {
   console.log(`Import mirrored web chat archive into Codex /resume.
 
 Usage:
-  node export_codex.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [--archive DIR] [--codex-home DIR] [--cwd DIR] [--no-state] [--no-legacy-index] [--dry-run]
+  node export_codex.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [--archive DIR] [--codex-home DIR] [--cwd DIR] [--limit N] [--no-state] [--no-legacy-index] [--dry-run]
 
 Defaults:
   archive:    ${archiveRoot}
   codex-home: ${codexHome}
   cwd:        ${codexCwd}
+
+By default, imported web chats use <codex-home>/webchat-imports as a stable
+virtual cwd so they do not appear as sessions for whatever project directory
+Codex is currently filtering by. Pass --cwd only when you intentionally want to
+bind imported web chats to a specific local workspace.
 
 What it writes:
   - Codex rollout files under <codex-home>/sessions/YYYY/MM/DD/
@@ -52,6 +58,17 @@ function readFlag(name) {
   if (i >= 0 && args[i + 1] && !args[i + 1].startsWith('-')) return args[i + 1];
   const inline = args.find(a => a.startsWith(`${name}=`));
   return inline ? inline.slice(name.length + 1) : '';
+}
+
+function readPositiveIntFlag(name) {
+  const raw = readFlag(name);
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`Invalid ${name}: ${raw}. Expected a positive integer.`);
+    process.exit(2);
+  }
+  return n;
 }
 
 function positionalArgs() {
@@ -195,6 +212,12 @@ function plusSeconds(iso, seconds) {
   return new Date((Number.isNaN(ms) ? Date.now() : ms) + seconds * 1000).toISOString();
 }
 
+function stableUnknownTimestamp(platform, id) {
+  const hash = crypto.createHash('sha1').update(`${platform}:${id}`).digest();
+  const offset = hash.readUInt32BE(0) % (365 * 24 * 60 * 60);
+  return new Date(Date.UTC(2000, 0, 1) + offset * 1000).toISOString();
+}
+
 async function loadClaude() {
   const dir = path.join(archiveRoot, 'claude');
   const files = await listJSON(dir);
@@ -234,7 +257,9 @@ async function loadChatGPT() {
     const j = await readJSON(sourceFile);
     if (!j.mapping) continue;
     const nodes = chatgptPathNodes(j.mapping, j.current_node);
-    const baseTs = isoFromAny(j.create_time || j.update_time) || new Date().toISOString();
+    const sourceStartTs = isoFromAny(j.create_time || j.update_time, null);
+    const sourceEndTs = isoFromAny(j.update_time || j.create_time, null);
+    const baseTs = sourceStartTs || stableUnknownTimestamp('chatgpt', j.conversation_id || path.basename(name, '.json'));
     const turns = [];
     for (let idx = 0; idx < nodes.length; idx++) {
       const msg = nodes[idx]?.message;
@@ -251,8 +276,9 @@ async function loadChatGPT() {
       id: j.conversation_id || path.basename(name, '.json'),
       title: j.title || '(untitled)',
       model: j.default_model_slug || 'chatgpt',
-      startedAt: isoFromAny(j.create_time || j.update_time, baseTs),
-      endedAt: isoFromAny(j.update_time || j.create_time, baseTs),
+      timestampConfidence: sourceStartTs || sourceEndTs ? 'chatgpt:conversation' : 'ordered_fallback',
+      startedAt: sourceStartTs || baseTs,
+      endedAt: sourceEndTs || (turns.length ? turns[turns.length - 1].ts : baseTs),
       sourceFile,
       turns,
     });
@@ -266,19 +292,21 @@ async function loadGemini() {
   const sessions = [];
   for (const name of files) {
     const sourceFile = path.join(dir, name);
-    const stat = await fs.stat(sourceFile);
     const j = await readJSON(sourceFile);
-    const baseTs = isoFromAny(j.synced_at, stat.mtime.toISOString()) || new Date().toISOString();
+    const sourceTs = isoFromAny(j.created_at || j.updated_at || j.last_message_at || j.timestamp, null);
+    const fallbackTs = stableUnknownTimestamp('gemini', j.id || path.basename(name, '.json'));
+    const baseTs = sourceTs || fallbackTs;
     const turns = (j.turns || []).map((t, idx) => ({
       role: normalizeRole(t.role),
       text: t.text || '',
-      ts: new Date(Date.parse(baseTs) + idx * 1000).toISOString(),
+      ts: isoFromAny(t.created_at || t.updated_at || t.timestamp, new Date(Date.parse(baseTs) + idx * 1000).toISOString()),
     }));
     sessions.push({
       platform: 'gemini',
       id: j.id || path.basename(name, '.json'),
       title: j.title || '(untitled)',
       model: 'gemini',
+      timestampConfidence: sourceTs ? (j.timestamp_source || 'source') : 'ordered_fallback',
       startedAt: baseTs,
       endedAt: turns.length ? turns[turns.length - 1].ts : baseTs,
       sourceFile,
@@ -461,6 +489,10 @@ async function writeCodexSession(session) {
   const file = rolloutPathFor(id, firstIso);
   const lines = [];
 
+  if (!dryRun) {
+    await removeOldRolloutsForWebchat(webchatId, file);
+  }
+
   lines.push(jsonLine({
     timestamp: firstIso,
     type: 'session_meta',
@@ -480,6 +512,7 @@ async function writeCodexSession(session) {
         raw_ref: session.sourceFile,
         platform: session.platform,
         imported_by: 'opal-mirror',
+        timestamp_confidence: session.timestampConfidence || 'source',
         url: session.url || '',
       },
     },
@@ -579,6 +612,27 @@ async function writeCodexSession(session) {
     firstUserMessage: groups[0].user.text,
     model: session.model || session.platform,
   };
+}
+
+async function removeOldRolloutsForWebchat(webchatId, keepFile) {
+  const root = path.join(codexHome, 'sessions');
+  const files = [];
+  async function walk(dir) {
+    let entries = [];
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+    catch { return; }
+    for (const entry of entries) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(p);
+      else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) files.push(p);
+    }
+  }
+  await walk(root);
+  for (const f of files) {
+    if (path.resolve(f) === path.resolve(keepFile)) continue;
+    const existingId = await webchatIdFromRollout(f);
+    if (existingId === webchatId) await fs.rm(f, { force: true });
+  }
 }
 
 function sqlValue(value) {
@@ -729,6 +783,7 @@ async function appendLegacyIndexes(rows) {
   const sessionIndex = path.join(codexHome, 'session_index.jsonl');
   const history = path.join(codexHome, 'history.jsonl');
   const ids = new Set(rows.map(r => r.id));
+  const webchatIds = new Set(rows.map(r => r.webchatId));
   const indexLines = [];
   const historyLines = [];
   for (const r of rows) {
@@ -747,13 +802,14 @@ async function appendLegacyIndexes(rows) {
     }));
     historyLines.push(jsonLine({
       session_id: r.id,
+      webchat_id: r.webchatId,
       ts: r.lastIso,
       text: r.title,
       cwd: codexCwd,
     }));
   }
-  await replaceJsonlRows(sessionIndex, row => !ids.has(row?.id), indexLines);
-  await replaceJsonlRows(history, row => !ids.has(row?.session_id), historyLines);
+  await replaceJsonlRows(sessionIndex, row => !ids.has(row?.id) && !webchatIds.has(row?.webchat_id), indexLines);
+  await replaceJsonlRows(history, row => !ids.has(row?.session_id) && !webchatIds.has(row?.webchat_id), historyLines);
   return { skipped: false };
 }
 
@@ -783,7 +839,8 @@ async function loadSessions() {
   if (target === 'all' || target === 'deepseek') sessions.push(...await loadDeepSeek());
   if (target === 'all' || target === 'doubao') sessions.push(...await loadDoubao());
   if (target === 'all' || target === 'qwen') sessions.push(...await loadQwen());
-  return sessions;
+  sessions.sort((a, b) => String(b.endedAt || '').localeCompare(String(a.endedAt || '')));
+  return importLimit ? sessions.slice(0, importLimit) : sessions;
 }
 
 async function main() {

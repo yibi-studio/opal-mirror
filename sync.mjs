@@ -2,7 +2,7 @@
 // opal-mirror — pulls Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen
 // conversation history from your already-logged-in Chrome via a CDP proxy.
 //
-// Usage: node sync.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen]
+// Usage: node sync.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [--limit N]
 // Env:   AI_CHAT_ARCHIVE_DIR  output directory (default: <script-dir>/ai-chat-archive)
 //        CDP_PROXY            CDP proxy URL    (default: http://localhost:3456)
 
@@ -14,14 +14,54 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = process.env.CDP_PROXY || 'http://localhost:3456';
 // Default: data dir co-located with the script. Override via AI_CHAT_ARCHIVE_DIR.
 const ROOT = process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive');
+const args = process.argv.slice(2);
+
+function readFlag(name) {
+  const i = args.indexOf(name);
+  if (i >= 0 && args[i + 1] && !args[i + 1].startsWith('-')) return args[i + 1];
+  const inline = args.find(a => a.startsWith(`${name}=`));
+  return inline ? inline.slice(name.length + 1) : '';
+}
+
+function readPositiveIntFlag(name) {
+  const raw = readFlag(name);
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`Invalid ${name}: ${raw}. Expected a positive integer.`);
+    process.exit(2);
+  }
+  return n;
+}
+
+const FETCH_LIMIT = readPositiveIntFlag('--limit');
+
+function applyLimit(items) {
+  return FETCH_LIMIT ? items.slice(0, FETCH_LIMIT) : items;
+}
+
+function positionalArgs() {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith('--')) {
+      if (!arg.includes('=') && args[i + 1] && !args[i + 1].startsWith('-')) i++;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    out.push(arg);
+  }
+  return out;
+}
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`opal-mirror — sync Claude / ChatGPT / Gemini history from Chrome.
 
 Usage:
-  node sync.mjs [target] [--no-index]
+  node sync.mjs [target] [--no-index] [--limit N]
     target = all | claude | chatgpt | gemini | deepseek | doubao | qwen  (default: all)
     --no-index   skip auto-rebuild of INDEX.md after sync
+    --limit N    limit newly fetched conversations per platform
 
 Environment:
   AI_CHAT_ARCHIVE_DIR        output dir  (current: ${ROOT})
@@ -58,6 +98,12 @@ async function evalIn(targetId, expr) {
   const j = await r.json();
   if (j.error) throw new Error(`eval error: ${j.error} :: ${j.message || ''} :: ${expr.slice(0, 120)}`);
   return j.value;
+}
+
+function parseEvalJson(value) {
+  if (typeof value === 'string') return JSON.parse(value);
+  if (value && typeof value === 'object') return value;
+  throw new Error(`unexpected eval value: ${typeof value}`);
 }
 
 async function findTarget(matcher) {
@@ -114,9 +160,13 @@ async function syncDeepSeek() {
 
     page++;
     beforeSeq = batch[batch.length - 1].seq_id;
+    if (FETCH_LIMIT && sessions.length >= FETCH_LIMIT) {
+      sessions.length = FETCH_LIMIT;
+      break;
+    }
     if (!data.has_more) break;
   }
-  console.log(`[deepseek] ${sessions.length} unique sessions`);
+  console.log(`[deepseek] ${sessions.length} session(s) selected${FETCH_LIMIT ? ` (--limit ${FETCH_LIMIT})` : ''}`);
 
   // 2. fetch each session's messages
   let total = 0, skipped = 0;
@@ -183,11 +233,15 @@ async function syncDoubao() {
     if (batch.length === 0) break;
     threads.push(...batch);
     pageNum++;
+    if (FETCH_LIMIT && threads.length >= FETCH_LIMIT) {
+      threads.length = FETCH_LIMIT;
+      break;
+    }
     if (!data.has_more) break;
     // cursor 字段名待确认，简单先用 thread_id_str
     cursor = batch[batch.length - 1]?.thread_id_str || batch[batch.length - 1]?.thread_id;
   }
-  console.log(`[doubao] ${threads.length} thread(s)`);
+  console.log(`[doubao] ${threads.length} thread(s) selected${FETCH_LIMIT ? ` (--limit ${FETCH_LIMIT})` : ''}`);
 
   // 2. fetch each thread's messages (paginated by anchor_index)
   let total = 0, skipped = 0;
@@ -299,11 +353,15 @@ async function syncQwen() {
     const batch = j?.data?.list || [];
     if (batch.length === 0) break;
     sessions.push(...batch);
+    if (FETCH_LIMIT && sessions.length >= FETCH_LIMIT) {
+      sessions.length = FETCH_LIMIT;
+      break;
+    }
     if (!j.data.have_next_page) break;
     pageNum++;
     await new Promise(r => setTimeout(r, 200));
   }
-  console.log(`[qwen] ${sessions.length} session(s)`);
+  console.log(`[qwen] ${sessions.length} session(s) selected${FETCH_LIMIT ? ` (--limit ${FETCH_LIMIT})` : ''}`);
 
   // 2. 逐 session 拉消息记录
   let total = 0, skipped = 0;
@@ -359,12 +417,15 @@ async function syncClaude() {
 
   let total = 0;
   for (const org of orgs) {
+    if (FETCH_LIMIT && total >= FETCH_LIMIT) break;
     const listRaw = await evalIn(t.targetId,
       `fetch("/api/organizations/${org.uuid}/chat_conversations",{credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify(d.map(c=>({uuid:c.uuid,name:c.name,updated_at:c.updated_at,created_at:c.created_at}))))`);
     const list = JSON.parse(listRaw);
-    console.log(`[claude] org ${org.name}: ${list.length} conversations`);
+    const remaining = FETCH_LIMIT ? Math.max(FETCH_LIMIT - total, 0) : list.length;
+    const selected = FETCH_LIMIT ? list.slice(0, remaining) : list;
+    console.log(`[claude] org ${org.name}: ${selected.length} conversation(s) selected${FETCH_LIMIT ? ` from ${list.length} (--limit ${FETCH_LIMIT})` : ''}`);
 
-    for (const c of list) {
+    for (const c of selected) {
       const file = path.join(ROOT, 'claude', `${c.uuid}.json`);
       try {
         const existing = JSON.parse(await fs.readFile(file, 'utf8'));
@@ -396,7 +457,7 @@ async function syncChatGPT() {
 
   const sessRaw = await evalIn(t.targetId,
     `fetch("/api/auth/session",{credentials:"include"}).then(r=>r.json()).then(d=>JSON.stringify({hasToken:!!d.accessToken,user:d.user&&d.user.email}))`);
-  const sessInfo = JSON.parse(sessRaw);
+  const sessInfo = parseEvalJson(sessRaw);
   console.log(`[chatgpt] session: ${JSON.stringify(sessInfo)}`);
   if (!sessInfo.hasToken) {
     console.log('[chatgpt] not logged in — open chatgpt.com in Chrome and sign in');
@@ -433,16 +494,20 @@ async function syncChatGPT() {
   }
 
   let offset = 0;
-  const limit = 100;
+  const pageLimit = FETCH_LIMIT ? Math.min(Math.max(FETCH_LIMIT, 1), 100) : 100;
   const allConvos = [];
   while (true) {
-    const page = await chatgptFetch(`/backend-api/conversations?offset=${offset}&limit=${limit}&order=updated`, `list@${offset}`);
+    const page = await chatgptFetch(`/backend-api/conversations?offset=${offset}&limit=${pageLimit}&order=updated`, `list@${offset}`);
     if (!page.items || page.items.length === 0) break;
     allConvos.push(...page.items);
+    if (FETCH_LIMIT && allConvos.length >= FETCH_LIMIT) {
+      allConvos.length = FETCH_LIMIT;
+      break;
+    }
     if (allConvos.length >= page.total) break;
     offset += page.items.length;
   }
-  console.log(`[chatgpt] ${allConvos.length} conversations total`);
+  console.log(`[chatgpt] ${allConvos.length} conversation(s) selected${FETCH_LIMIT ? ` (--limit ${FETCH_LIMIT})` : ''}`);
 
   let total = 0, skipped = 0, consecutiveFails = 0;
   for (const c of allConvos) {
@@ -479,8 +544,16 @@ async function syncChatGPT() {
 }
 
 // ---------- Gemini ----------
-// Gemini has no clean REST API. We scrape the sidebar then navigate into each
-// conversation and read rendered transcripts from the DOM.
+// Gemini uses Google batchexecute RPCs. MaZiqc returns the recent conversation
+// list including the original last-updated timestamp; the rendered DOM sidebar
+// does not expose that timestamp.
+function isoFromGoogleTimestamp(value) {
+  if (!Array.isArray(value) || !Number.isFinite(Number(value[0]))) return '';
+  const seconds = Number(value[0]);
+  const nanos = Number(value[1] || 0);
+  return new Date(seconds * 1000 + Math.floor(nanos / 1e6)).toISOString();
+}
+
 async function syncGemini() {
   let t = await findTarget(x => x.url.startsWith('https://gemini.google.com'));
   if (!t) {
@@ -490,23 +563,104 @@ async function syncGemini() {
   }
   console.log(`[gemini] using tab ${t.targetId}`);
 
-  const listRaw = await evalIn(t.targetId,
-    `(()=>{const a=[...document.querySelectorAll("conversations-list a[href*='/app/']")].map(x=>({href:x.href,id:x.href.split("/app/")[1]?.split(/[?#]/)[0],title:x.textContent.trim()}));return JSON.stringify(a);})()`);
-  const list = JSON.parse(listRaw);
-  console.log(`[gemini] sidebar lists ${list.length} conversation(s)`);
+  const count = FETCH_LIMIT || 500;
+  const listRaw = await evalIn(t.targetId, `
+    (async()=>{
+      function atToken(){
+        const input=document.querySelector('input[name="at"]');
+        if(input?.value) return input.value;
+        if(window.WIZ_global_data?.SNlM0e) return window.WIZ_global_data.SNlM0e;
+        const m=document.documentElement.innerHTML.match(/"SNlM0e":"([^"]+)"/);
+        return m ? m[1] : '';
+      }
+      function parseBatch(text){
+        text=String(text || '').replace(/^\\)\\]\\}'\\n+/, '');
+        const lines=text.split('\\n').filter(l=>l.trim());
+        const payloads=[];
+        for(let i=0;i<lines.length;){
+          const len=parseInt(lines[i++],10);
+          const line=lines[i++]||'';
+          if(!Number.isFinite(len)) continue;
+          try{
+            const seg=JSON.parse(line);
+            for(const entry of seg){
+              if(Array.isArray(entry)&&entry[0]==='wrb.fr'&&entry[1]==='MaZiqc'&&typeof entry[2]==='string'){
+                payloads.push(JSON.parse(entry[2]));
+              }
+            }
+          }catch{}
+        }
+        return payloads;
+      }
+      function collectRows(node, rows=[]){
+        if(Array.isArray(node)){
+          if(typeof node[0]==='string' && node[0].startsWith('c_') && typeof node[1]==='string' && Array.isArray(node[5])){
+            rows.push(node);
+          }
+          for(const child of node) collectRows(child, rows);
+        }
+        return rows;
+      }
+      const at=atToken();
+      const params=new URLSearchParams({rpcids:'MaZiqc','source-path':location.pathname,hl:document.documentElement.lang||'en',rt:'c'});
+      const rpcPayload=[[['MaZiqc',JSON.stringify([${count},null,[0,null,1]]),null,'generic']]];
+      const body=new URLSearchParams({'f.req':JSON.stringify(rpcPayload), at});
+      try{
+        const res=await fetch('/_/BardChatUi/data/batchexecute?'+params.toString(),{
+          method:'POST',
+          credentials:'include',
+          headers:{'content-type':'application/x-www-form-urlencoded;charset=UTF-8','x-same-domain':'1','accept':'*/*'},
+          body:body.toString()+'&'
+        });
+        const text=await res.text();
+        const rows=collectRows(parseBatch(text)).map(row=>({
+          href: new URL('/app/'+String(row[0]).replace(/^c_/,''), location.origin).href,
+          id: String(row[0]).replace(/^c_/,''),
+          title: row[1] || '',
+          updated_at_google: row[5] || null
+        }));
+        if(rows.length) return JSON.stringify({source:'MaZiqc', rows});
+      }catch(e){}
+      const rows=[...document.querySelectorAll("conversations-list a[href*='/app/']")].map(x=>({
+        href:x.href,
+        id:x.href.split("/app/")[1]?.split(/[?#]/)[0],
+        title:x.textContent.trim(),
+        updated_at_google:null
+      }));
+      return JSON.stringify({source:'dom', rows});
+    })()
+  `.trim());
+  const listPayload = JSON.parse(listRaw);
+  const list = listPayload.rows.map(row => ({
+    ...row,
+    updated_at: isoFromGoogleTimestamp(row.updated_at_google),
+  }));
+  const selected = applyLimit(list);
+  console.log(`[gemini] ${selected.length} conversation(s) selected from ${listPayload.source}${FETCH_LIMIT ? ` (--limit ${FETCH_LIMIT})` : ` (${list.length} total)`}`);
 
   let total = 0;
-  for (const c of list) {
+  for (const c of selected) {
     if (!c.id) continue;
     const file = path.join(ROOT, 'gemini', `${c.id}.json`);
 
     await fetch(`${PROXY}/navigate?target=${t.targetId}&url=${encodeURIComponent(c.href)}`);
-    let last = -1;
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 600));
-      const n = await evalIn(t.targetId, `document.querySelectorAll("user-query").length`);
-      if (n === last && n > 0) break;
-      last = n;
+    let last = -1, stable = 0, loaded = 0;
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 700));
+      const stateRaw = await evalIn(t.targetId, `
+        JSON.stringify({
+          href: location.href,
+          nodes: document.querySelectorAll("user-query, model-response").length,
+          users: document.querySelectorAll("user-query").length
+        })
+      `.trim());
+      const state = JSON.parse(stateRaw);
+      loaded = state.nodes;
+      if (!state.href.includes(`/app/${c.id}`)) continue;
+      if (state.nodes > 0 && state.nodes === last) stable++;
+      else stable = 0;
+      last = state.nodes;
+      if (stable >= 2) break;
     }
 
     const turnsRaw = await evalIn(t.targetId, `
@@ -522,11 +676,18 @@ async function syncGemini() {
       })()
     `.trim());
     const turns = JSON.parse(turnsRaw);
+    if (turns.length === 0) {
+      console.log(`    [skip] ${c.title?.slice(0, 50) || c.id}: no rendered turns after navigation (${loaded} nodes)`);
+      continue;
+    }
 
     const record = {
       id: c.id,
       title: c.title,
       url: c.href,
+      updated_at: c.updated_at || null,
+      last_message_at: c.updated_at || null,
+      timestamp_source: c.updated_at ? 'gemini:MaZiqc' : 'unknown',
       synced_at: new Date().toISOString(),
       turn_count: turns.length,
       turns,
@@ -540,9 +701,8 @@ async function syncGemini() {
 }
 
 // ---------- Main ----------
-const args = process.argv.slice(2);
 const noIndex = args.includes('--no-index');
-const which = args.find(a => !a.startsWith('-')) || 'all';
+const which = positionalArgs()[0] || 'all';
 
 const result = {};
 try {

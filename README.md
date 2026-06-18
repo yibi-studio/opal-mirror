@@ -4,12 +4,47 @@
 
 不依赖第三方服务、不导出 cookie、不暴露 token——通过 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) 让你**已经登录的 Chrome 标签页自己调它后端的 API**，结果回传到本地。
 
-## 给 Agent 的一句话
+## 推荐入口：作为 Agent Skill 使用
+
+最适合普通用户的形态不是手敲 README 命令，而是从 skill hub 安装 `opal-mirror` skill，让 Agent 完成初始化、自检和有限数量导入。
+
+安装 skill 后，把这句话发给 Agent：
+
+```text
+请用 $opal-mirror 初始化我的本地 Agent，上来先 bootstrap 检查环境，不要新开 Chrome profile；确认主 Chrome 和登录状态没问题后，问我要同步多少条，再把这些网页端大模型聊天记录导入 Codex /resume。
+```
+
+skill 包在本仓库：
+
+```text
+skill/opal-mirror
+```
+
+首次运行会：
+
+- 自动检查 `git` 和 Node.js 18+。
+- 没有本地 repo 时 clone `https://github.com/1va7/opal-mirror.git` 到 `~/.local/share/opal-mirror`。
+- 运行 `npm install`。
+- 只使用用户已经登录的主 Chrome profile，通过内置 CDP proxy 连接；不会创建、建议或切换到新的 `--user-data-dir`。
+- `bootstrap` 成功后才询问用户同步数量，并用 bounded import 写入本地 archive / Codex `/resume`。
+
+手动触发等价命令：
+
+```bash
+skill/opal-mirror/scripts/opal_mirror_skill.sh bootstrap chatgpt
+skill/opal-mirror/scripts/opal_mirror_skill.sh import-codex-limited chatgpt 20
+```
+
+如果 Chrome 报 `DevTools remote debugging requires a non-default data directory`，skill 会停下来报错。这个版本的 Chrome/策略阻止了“已登录主 profile + CDP”的工作流；不要用新 profile 绕过。
+
+`sync` / `import` 在 skill wrapper 里默认必须带数量限制，避免首次使用误跑全量。
+
+## 给 Agent 的一句话（CLI 版）
 
 把这句话发给你的 Agent：
 
 ```text
-请帮我使用 https://github.com/1va7/opal-mirror 同步我的网页端大模型聊天记录；先运行 npx github:1va7/opal-mirror doctor，根据检查结果帮我配置环境，然后运行 npx github:1va7/opal-mirror sync。不要上传或提交 ai-chat-archive、cookie、token、SQLite、JSONL 或浏览器配置文件。
+请帮我使用 https://github.com/1va7/opal-mirror 同步我的网页端大模型聊天记录；先运行 doctor，根据检查结果帮我配置环境，然后问我要同步多少条，再运行带 --limit 的 sync/import。不要新开 Chrome profile，不要上传或提交 ai-chat-archive、cookie、token、SQLite、JSONL 或浏览器配置文件。
 ```
 
 如果你自己会用终端，可以先跑：

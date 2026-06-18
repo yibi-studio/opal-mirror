@@ -5,9 +5,11 @@
 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { parseEvalValue } from './lib/doctor_eval.mjs';
 
 const PROXY = process.env.CDP_PROXY || 'http://localhost:3456';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REQUIRE_TARGET = process.env.OPAL_MIRROR_REQUIRE_TARGET || '';
 
 const checks = [];
 const ok = (name, msg='') => { checks.push({ name, ok: true, msg }); console.log(`  ✓ ${name}${msg?' — '+msg:''}`); };
@@ -78,24 +80,30 @@ if (targets) {
   ];
 
   for (const m of matchers) {
+    if (REQUIRE_TARGET && REQUIRE_TARGET !== 'all' && m.key !== REQUIRE_TARGET) {
+      continue;
+    }
     const t = targets.find(m.match);
     if (!t) {
-      warn(m.name, `no tab open — visit the site in your debugged Chrome to enable sync`);
+      const msg = `no tab open — visit the site in your debugged Chrome to enable sync`;
+      REQUIRE_TARGET === m.key ? fail(m.name, msg) : warn(m.name, msg);
       continue;
     }
     try {
       const evalR = await fetch(`${PROXY}/eval?target=${t.targetId}`, { method: 'POST', body: m.probe(t.targetId) });
       const j = await evalR.json();
       if (j.error) { warn(m.name, `tab open but probe failed: ${j.error}`); continue; }
-      const result = JSON.parse(j.value);
+      const result = parseEvalValue(j.value);
       if (result.ok) {
         const meta = Object.entries(result).filter(([k]) => k !== 'ok').map(([k,v]) => `${k}=${v}`).join(', ');
         ok(m.name, `logged in${meta ? ', ' + meta : ''}`);
       } else {
-        warn(m.name, `tab open but not logged in`);
+        const msg = `tab open but not logged in`;
+        REQUIRE_TARGET === m.key ? fail(m.name, msg) : warn(m.name, msg);
       }
     } catch (e) {
-      warn(m.name, `probe error: ${e.message}`);
+      const msg = `probe error: ${e.message}`;
+      REQUIRE_TARGET === m.key ? fail(m.name, msg) : warn(m.name, msg);
     }
   }
 }

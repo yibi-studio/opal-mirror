@@ -1,0 +1,4 @@
+interface:
+  display_name: "Opal Mirror"
+  short_description: "Sync web LLM chats into local Agent context"
+  default_prompt: "Use $opal-mirror to onboard my local Agent with recent web LLM chat history."
