@@ -9,11 +9,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXPORT = path.join(__dirname, 'export_codex.mjs');
+const REPAIR = path.join(__dirname, 'repair_codex_app_frontend.mjs');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'opal-codex-export-'));
 const archive = path.join(tmp, 'archive');
 const codexHome = path.join(tmp, 'codex-home');
 const cwd = path.join(tmp, 'workspace');
+const appCwd = path.join(os.homedir(), 'Documents', 'Codex');
 const results = [];
 
 const pass = (name, msg = '') => { results.push({ ok: true, name }); console.log(`  ✓ ${name}${msg ? ' — ' + msg : ''}`); };
@@ -28,6 +30,20 @@ async function writeJSON(file, value) {
 async function setup() {
   await fs.mkdir(codexHome, { recursive: true });
   await fs.mkdir(cwd, { recursive: true });
+  await writeJSON(path.join(codexHome, '.codex-global-state.json'), {
+    'projectless-thread-ids': ['existing-thread'],
+    'thread-workspace-root-hints': { 'existing-thread': appCwd },
+    'thread-projectless-output-directories': { 'existing-thread': path.join(appCwd, 'existing', 'outputs') },
+    'electron-persisted-atom-state': {
+      'heartbeat-thread-permissions-by-id': {
+        'existing-thread': {
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          sandboxPolicy: { type: 'dangerFullAccess' },
+        },
+      },
+    },
+  });
   await writeJSON(path.join(archive, 'chatgpt', 'cg-1.json'), {
     conversation_id: 'cg-1',
     title: 'ChatGPT multi turn',
@@ -115,7 +131,7 @@ async function setup() {
   });
 }
 
-function runExport(extraArgs = []) {
+function runExport(extraArgs = [], extraEnv = {}) {
   return spawnSync('node', [
     EXPORT,
     'all',
@@ -123,17 +139,27 @@ function runExport(extraArgs = []) {
     '--codex-home', codexHome,
     '--cwd', cwd,
     ...extraArgs,
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', env: { ...process.env, ...extraEnv } });
 }
 
-function runExportDefaultCwd(extraArgs = []) {
+function runExportDefaultCwd(extraArgs = [], extraEnv = {}) {
   return spawnSync('node', [
     EXPORT,
     'all',
     '--archive', archive,
     '--codex-home', codexHome,
     ...extraArgs,
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', env: { ...process.env, ...extraEnv } });
+}
+
+function runRepair(extraArgs = [], extraEnv = {}) {
+  return spawnSync('node', [
+    REPAIR,
+    '--archive', archive,
+    '--codex-home', codexHome,
+    '--json',
+    ...extraArgs,
+  ], { encoding: 'utf8', env: { ...process.env, ...extraEnv } });
 }
 
 async function listRollouts() {
@@ -153,6 +179,23 @@ async function listRollouts() {
 
 async function readJsonl(file) {
   return (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
+async function removeAppFrontendIds(ids) {
+  const stateFile = path.join(codexHome, '.codex-global-state.json');
+  const state = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  const idSet = new Set(ids);
+  state['projectless-thread-ids'] = (state['projectless-thread-ids'] || []).filter(id => !idSet.has(id));
+  for (const id of ids) {
+    delete state['thread-workspace-root-hints']?.[id];
+    delete state['thread-projectless-output-directories']?.[id];
+    delete state['electron-persisted-atom-state']?.['heartbeat-thread-permissions-by-id']?.[id];
+  }
+  await fs.writeFile(stateFile, `${JSON.stringify(state)}\n`, 'utf8');
+}
+
+async function readGlobalState() {
+  return JSON.parse(await fs.readFile(path.join(codexHome, '.codex-global-state.json'), 'utf8'));
 }
 
 function sqliteAvailable() {
@@ -206,9 +249,23 @@ const first = runExport();
 assert(first.status === 0, 'export command succeeds', first.stderr.trim() || first.stdout.trim().split('\n').at(-1));
 
 const files = await listRollouts();
-assert(files.length === 6, 'rollout files written', `${files.length} sessions`);
+assert(files.length === 12, 'rollout files written', `${files.length} sessions`);
 const metaRows = await Promise.all(files.map(async file => (await readJsonl(file))[0]));
-assert(metaRows.every(row => row?.payload?.cwd === cwd), 'explicit cwd preserved');
+const terminalMetaRows = metaRows.filter(row => row?.payload?.metadata?.imported_by === 'opal-mirror' && row?.payload?.source === 'cli');
+const appMetaRows = metaRows.filter(row => row?.payload?.metadata?.imported_by === 'opal-mirror' && row?.payload?.source === 'vscode');
+assert(terminalMetaRows.length === 6 && terminalMetaRows.every(row => row?.payload?.cwd === cwd), 'explicit terminal cwd preserved');
+assert(appMetaRows.length === 6 && appMetaRows.every(row => row?.payload?.cwd === appCwd), 'App mirror cwd registered');
+const appThreadIds = Object.values(JSON.parse(await fs.readFile(path.join(archive, '_codex_app_thread_ids.json'), 'utf8')));
+const appThreadIdMap = JSON.parse(await fs.readFile(path.join(archive, '_codex_app_thread_ids.json'), 'utf8'));
+const globalState = JSON.parse(await fs.readFile(path.join(codexHome, '.codex-global-state.json'), 'utf8'));
+const projectlessIds = globalState['projectless-thread-ids'];
+const appFrontendOk = appThreadIds.length === 6
+  && appThreadIds.every(id => projectlessIds.includes(id))
+  && projectlessIds[0] === 'existing-thread'
+  && appThreadIds.every(id => globalState['thread-workspace-root-hints'][id] === appCwd)
+  && appThreadIds.every(id => globalState['thread-projectless-output-directories'][id] === path.join(appCwd, 'webchat-imports', id, 'outputs'))
+  && appThreadIds.every(id => globalState['electron-persisted-atom-state']['heartbeat-thread-permissions-by-id'][id]?.sandboxPolicy?.type === 'dangerFullAccess');
+assert(appFrontendOk, 'App frontend registry populated');
 
 let malformed = 0;
 let totalAgent = 0;
@@ -229,11 +286,16 @@ for (const file of files) {
     const stat = await fs.stat(file);
     const mtimeMs = Math.round(stat.mtimeMs / 1000) * 1000;
     const expected = Date.parse('2024-01-01T00:03:00.000Z');
-    assert(Math.abs(mtimeMs - expected) <= 1000, 'webchat mtime preserved', stat.mtime.toISOString());
+    if (meta?.payload?.source === 'cli') assert(Math.abs(mtimeMs - expected) <= 1000, 'terminal webchat mtime preserved', stat.mtime.toISOString());
+    if (meta?.payload?.source === 'vscode') assert(Math.abs(mtimeMs - expected) <= 1000, 'App webchat mtime preserved', stat.mtime.toISOString());
   }
 }
 assert(malformed === 0, 'rollout schema includes visible assistant messages', `agent=${totalAgent}, response=${totalAssistantResponse}`);
 assert(chatgptOk, 'ChatGPT multi-turn transcript complete');
+const appCgId = appThreadIdMap['webchat:chatgpt:cg-1'];
+assert(typeof appCgId === 'string' && appCgId.startsWith('018cc251-f400-'), 'App mirror id timestamp prefix uses source start time', appCgId);
+assert(appMetaRows.every(row => row?.payload?.metadata?.mirror_target === 'codex_app'), 'App metadata marks mirror target');
+assert(terminalMetaRows.every(row => row?.payload?.metadata?.mirror_target === 'terminal'), 'terminal metadata marks mirror target');
 
 const indexBefore = await fs.readFile(path.join(codexHome, 'session_index.jsonl'), 'utf8');
 const historyBefore = await fs.readFile(path.join(codexHome, 'history.jsonl'), 'utf8');
@@ -242,12 +304,81 @@ assert(second.status === 0, 'repeat export succeeds');
 const indexAfter = await fs.readFile(path.join(codexHome, 'session_index.jsonl'), 'utf8');
 const historyAfter = await fs.readFile(path.join(codexHome, 'history.jsonl'), 'utf8');
 assert(indexAfter === indexBefore && historyAfter === historyBefore, 'legacy indexes are idempotent');
+const globalStateAfter = JSON.parse(await fs.readFile(path.join(codexHome, '.codex-global-state.json'), 'utf8'));
+assert(appThreadIds.every(id => globalStateAfter['projectless-thread-ids'].filter(existing => existing === id).length === 1), 'App frontend registry is idempotent');
+const reset = runExport(['--reset-app-ids']);
+assert(reset.status === 0, 'App id reset export succeeds', reset.stderr.trim());
+const resetThreadIds = Object.values(JSON.parse(await fs.readFile(path.join(archive, '_codex_app_thread_ids.json'), 'utf8')));
+const resetGlobalState = JSON.parse(await fs.readFile(path.join(codexHome, '.codex-global-state.json'), 'utf8'));
+assert(
+  resetThreadIds.length === 6
+    && resetThreadIds.every(id => resetGlobalState['projectless-thread-ids'].includes(id))
+    && appThreadIds.every(id => !resetGlobalState['projectless-thread-ids'].includes(id))
+    && resetThreadIds.some((id, i) => id !== appThreadIds[i]),
+  'App id reset replaces frontend registry ids',
+);
+
+await removeAppFrontendIds(resetThreadIds);
+const resetAppRows = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), '-json', "select rollout_path, updated_at_ms from threads where source='vscode' and title like '[webchat:%';"], { encoding: 'utf8' });
+if (resetAppRows.status === 0 && resetAppRows.stdout.trim()) {
+  for (const row of JSON.parse(resetAppRows.stdout)) {
+    const now = Date.now() / 1000;
+    await fs.utimes(row.rollout_path, now, now);
+  }
+  const mtimeRepair = runRepair(['--fix-mtime-only'], {
+    OPAL_MIRROR_ASSUME_REAL_CODEX_HOME: '1',
+    OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING: '1',
+  });
+  let mtimeRepairResult = {};
+  try { mtimeRepairResult = JSON.parse(mtimeRepair.stdout); } catch {}
+  assert(mtimeRepair.status === 0 && mtimeRepairResult.mtimes?.changed === 6, 'mtime-only repair works while Codex App is running', mtimeRepair.stdout.trim() || mtimeRepair.stderr.trim());
+}
+const repair = runRepair();
+let repairResult = {};
+try { repairResult = JSON.parse(repair.stdout); } catch {}
+assert(repair.status === 0 && repairResult.status === 'repaired' && repairResult.missingBefore === 6, 'repair restores missing App frontend registry', repair.stdout.trim() || repair.stderr.trim());
+const repairedState = await readGlobalState();
+assert(resetThreadIds.every(id => repairedState['projectless-thread-ids'].includes(id)), 'repair registers all App mirror ids');
+const repairAgain = runRepair();
+let repairAgainResult = {};
+try { repairAgainResult = JSON.parse(repairAgain.stdout); } catch {}
+assert(repairAgain.status === 0 && repairAgainResult.status === 'ok', 'repair is idempotent', repairAgain.stdout.trim() || repairAgain.stderr.trim());
+
+await removeAppFrontendIds(resetThreadIds);
+const deferredExport = runExport([], {
+  OPAL_MIRROR_ASSUME_REAL_CODEX_HOME: '1',
+  OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING: '1',
+});
+const deferredState = await readGlobalState();
+assert(
+  deferredExport.status === 0
+    && deferredExport.stdout.includes('sidebar registry repair deferred')
+    && resetThreadIds.every(id => !deferredState['projectless-thread-ids'].includes(id)),
+  'export defers App frontend registry while Codex App is running',
+  deferredExport.stdout.trim().split('\n').filter(line => line.includes('app frontend')).join(' | '),
+);
+const skippedRepair = runRepair([], {
+  OPAL_MIRROR_ASSUME_REAL_CODEX_HOME: '1',
+  OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING: '1',
+});
+let skippedRepairResult = {};
+try { skippedRepairResult = JSON.parse(skippedRepair.stdout); } catch {}
+assert(skippedRepair.status === 0 && skippedRepairResult.status === 'skipped', 'repair refuses live Codex App registry writes', skippedRepair.stdout.trim() || skippedRepair.stderr.trim());
+const postQuitRepair = runRepair([], {
+  OPAL_MIRROR_ASSUME_REAL_CODEX_HOME: '1',
+  OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING: '0',
+});
+let postQuitRepairResult = {};
+try { postQuitRepairResult = JSON.parse(postQuitRepair.stdout); } catch {}
+assert(postQuitRepair.status === 0 && postQuitRepairResult.status === 'repaired', 'repair succeeds after simulated Codex App quit', postQuitRepair.stdout.trim() || postQuitRepair.stderr.trim());
 
 if (sqliteAvailable()) {
   const count = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select count(*) from threads where title like '[webchat:%';"], { encoding: 'utf8' });
-  assert(count.status === 0 && count.stdout.trim() === '6', 'sqlite threads registered', count.stdout.trim());
-  const row = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select updated_at_ms, thread_source from threads where title='[webchat:chatgpt] ChatGPT multi turn';"], { encoding: 'utf8' });
+  assert(count.status === 0 && count.stdout.trim() === '12', 'sqlite threads registered', count.stdout.trim());
+  const row = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select updated_at_ms, thread_source from threads where title='[webchat:chatgpt] ChatGPT multi turn' and source='cli';"], { encoding: 'utf8' });
   assert(row.stdout.trim() === '1704067380000|user', 'sqlite timestamp/thread_source preserved', row.stdout.trim());
+  const appRow = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select source, cwd, cli_version from threads where title='[webchat:chatgpt] ChatGPT multi turn' and source='vscode';"], { encoding: 'utf8' });
+  assert(appRow.stdout.trim() === `vscode|${appCwd}|0.135.0`, 'sqlite App mirror registered', appRow.stdout.trim());
   const chatgptPath = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select rollout_path from threads where title='[webchat:chatgpt] ChatGPT multi turn' limit 1;"], { encoding: 'utf8' }).stdout.trim();
   const dup = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite')], {
     input: `insert into threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, archived, cli_version, first_user_message, memory_mode, model, created_at_ms, updated_at_ms, thread_source, preview) values ('legacy-duplicate-id', '${chatgptPath.replace(/'/g, "''")}', 1704067200, 1704067380, 'cli', 'metana', '${cwd.replace(/'/g, "''")}', '[webchat:chatgpt] ChatGPT multi turn', '{"type":"disabled"}', 'never', 0, 1, 0, '0.135.0', 'first question', 'enabled', 'gpt-5.5', 1704067200000, 1704067380000, 'user', 'first question');\n`,
@@ -257,7 +388,7 @@ if (sqliteAvailable()) {
   const third = runExport();
   assert(third.status === 0 && third.stdout.includes('pruned 1 duplicate'), 'duplicate sqlite webchat row pruned', third.stdout.trim().split('\n').at(-2) || third.stdout.trim());
   const countAfterPrune = spawnSync('sqlite3', [path.join(codexHome, 'state_5.sqlite'), "select count(*) from threads where title like '[webchat:%';"], { encoding: 'utf8' });
-  assert(countAfterPrune.stdout.trim() === '6', 'sqlite webchat count stable after prune', countAfterPrune.stdout.trim());
+  assert(countAfterPrune.stdout.trim() === '12', 'sqlite webchat count stable after prune', countAfterPrune.stdout.trim());
 }
 
 await fs.rm(path.join(codexHome, 'sessions'), { recursive: true, force: true });
@@ -268,7 +399,10 @@ assert(defaultCwdExport.status === 0, 'default cwd export succeeds', defaultCwdE
 const defaultFiles = await listRollouts();
 const defaultRows = await Promise.all(defaultFiles.map(async file => (await readJsonl(file))[0]));
 const expectedDefaultCwd = path.join(codexHome, 'webchat-imports');
-assert(defaultRows.length === 6 && defaultRows.every(row => row?.payload?.cwd === expectedDefaultCwd), 'default cwd is webchat-imports', expectedDefaultCwd);
+const defaultTerminalRows = defaultRows.filter(row => row?.payload?.source === 'cli');
+const defaultAppRows = defaultRows.filter(row => row?.payload?.source === 'vscode');
+assert(defaultRows.length === 12 && defaultTerminalRows.length === 6 && defaultTerminalRows.every(row => row?.payload?.cwd === expectedDefaultCwd), 'default terminal cwd is webchat-imports', expectedDefaultCwd);
+assert(defaultAppRows.length === 6 && defaultAppRows.every(row => row?.payload?.cwd === appCwd), 'default App mirror cwd registered');
 
 console.log('\n=== SUMMARY ===');
 const passed = results.filter(r => r.ok).length;

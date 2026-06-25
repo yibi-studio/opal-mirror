@@ -1,7 +1,7 @@
 {
   "name": "opal-mirror",
-  "version": "0.3.0",
-  "description": "Sync Claude / ChatGPT / Gemini / DeepSeek / Doubao / Qwen chat history to local JSON via Chrome DevTools Protocol",
+  "version": "0.4.0",
+  "description": "Sync web LLM chat history to local JSON and mirror it into terminal Codex /resume and Codex App sessions",
   "type": "module",
   "bin": {
     "opal-mirror": "./bin/opal-mirror.mjs"
@@ -16,6 +16,7 @@
     "sync:doubao": "node sync.mjs doubao",
     "sync:qwen": "node sync.mjs qwen",
     "export:codex": "node export_codex.mjs",
+    "repair:codex-app": "node repair_codex_app_frontend.mjs",
     "index": "node build_index.mjs",
     "test": "node test_codex_export.mjs && node test_doctor.mjs && node test_skill_product.mjs",
     "test:e2e": "node test_e2e.mjs",

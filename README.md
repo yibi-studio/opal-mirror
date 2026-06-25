@@ -11,7 +11,7 @@
 安装 skill 后，把这句话发给 Agent：
 
 ```text
-请用 $opal-mirror 初始化我的本地 Agent，上来先 bootstrap 检查环境，不要新开 Chrome profile；确认主 Chrome 和登录状态没问题后，问我要同步多少条，再把这些网页端大模型聊天记录导入 Codex /resume。
+请用 $opal-mirror 初始化我的本地 Agent，上来先 bootstrap 检查环境，不要新开 Chrome profile；确认主 Chrome 和登录状态没问题后，问我要同步多少条，再把这些网页端大模型聊天记录导入 terminal Codex /resume 和 Codex App。
 ```
 
 skill 包在本仓库：
@@ -154,7 +154,7 @@ node sync.mjs qwen
 # 生成可读的索引表（sync 后会自动跑，单独触发用这个）
 node build_index.mjs
 
-# 导入到 terminal Codex 的 /resume 列表
+# 导入到 terminal Codex 的 /resume 列表，并生成 Codex App mirror
 node export_codex.mjs chatgpt --codex-home ~/.codex
 # 或：
 npx github:1va7/opal-mirror export-codex chatgpt --codex-home ~/.codex --cwd ~
@@ -302,9 +302,14 @@ CDP_PROXY=http://localhost:9999 node sync.mjs
 }
 ```
 
-## 导入 terminal Codex /resume
+## 导入 Codex /resume 和 Codex App
 
-`export_codex.mjs` 会把 web chat archive 转成 Codex TUI 能直接 `/resume` 的本地 session：
+`export_codex.mjs` 会把 web chat archive 转成两份本地 Codex mirror：
+
+- `source=cli`：terminal Codex 的 `/resume` 列表。
+- `source=vscode`：Codex App 的 sidebar/search。
+
+这两份不是合并成同一个 thread，而是同一条 web chat 的两个本地目标副本。标题统一带 `[webchat:<platform>]`，用于和原生 Codex App 对话区分。
 
 ```bash
 # 建议先退出正在运行的 terminal Codex，再导入
@@ -324,15 +329,31 @@ node export_codex.mjs chatgpt --codex-home /tmp/codex-test --no-state
 ~/.codex/state_5.sqlite
 ~/.codex/session_index.jsonl
 ~/.codex/history.jsonl
+~/.codex/.codex-global-state.json   # Codex App sidebar registry
+<archive>/_codex_app_thread_ids.json
 ```
 
 这里有几个和 `/resume` 兼容相关的细节：
 
 - `/resume` 主要读 `state_5.sqlite` 的 `threads` 表；只放 JSONL 文件不够。
 - transcript 里同时写 `event_msg.user_message`、`event_msg.agent_message` 和 `response_item`，所以进入 session 后能看到用户消息和模型回复。
-- SQLite 的 `created_at_ms/updated_at_ms`、rollout JSONL 的 timestamp、文件 mtime 都用 web chat 原始发生时间；导入后不会按“刚刚导入”的时间堆到列表最前面。
+- SQLite 的 `created_at_ms/updated_at_ms`、rollout JSONL 的 timestamp、文件 mtime、Codex App mirror thread id 的时间前缀都用 web chat 原始发生时间；导入后不会按“刚刚导入”的时间堆到列表最前面。
+- Codex App mirror 的 metadata 写入 `mirror_target=codex_app`；terminal mirror 写入 `mirror_target=terminal`。
 - 重复运行是幂等的：SQLite 用同一个 thread id 更新，legacy `session_index.jsonl/history.jsonl` 会替换旧行。
 - 导入前会给 `state_5.sqlite` 写一份 `state_5.sqlite.backup-before-opal-mirror-import-*` 备份。
+- 如果 Codex App 正在运行，sidebar registry 写入会被延后，因为 App 退出时可能从内存覆盖 `~/.codex/.codex-global-state.json`。完全退出 Codex App 后运行 repair 命令即可补上：
+
+```bash
+node repair_codex_app_frontend.mjs --archive ./ai-chat-archive --codex-home ~/.codex
+# 或 npm script:
+npm run repair:codex-app -- --archive ./ai-chat-archive --codex-home ~/.codex
+```
+
+只修 App rollout 文件 mtime、不碰 sidebar registry，可在 App 运行时执行：
+
+```bash
+node repair_codex_app_frontend.mjs --archive ./ai-chat-archive --codex-home ~/.codex --fix-mtime-only
+```
 
 导入后可检查：
 
@@ -384,8 +405,9 @@ npm run test:all
 `test_codex_export.mjs` 用临时 archive 验证 Codex 导入：
 
 - rollout JSONL 包含可见的 user / assistant transcript 事件
-- 文件 mtime 和 SQLite `updated_at_ms` 使用 web chat 原始时间
+- terminal 和 Codex App mirror 的文件 mtime、SQLite `updated_at_ms`、App thread id 时间前缀使用 web chat 原始时间
 - `state_5.sqlite` threads 注册可被 `/resume` 发现
+- Codex App frontend registry 可 repair 且幂等
 - 重复导入不会重复追加 legacy index
 
 ## 添加新平台

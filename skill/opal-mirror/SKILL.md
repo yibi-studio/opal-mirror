@@ -1,12 +1,12 @@
 ---
 name: opal-mirror
 description: This skill should be used when the user asks to sync, mirror, import, bootstrap, initialize, or migrate web LLM chat history from ChatGPT, Claude, Gemini, DeepSeek, Doubao, or Qwen into local files or Codex /resume sessions; trigger phrases include "同步网页端大模型聊天记录", "把 ChatGPT 历史导入本地 Agent", "让 Agent 认识我", "opal-mirror", "web chat to Codex resume", and "主人档案初始化".
-version: 0.1.0
+version: 0.2.0
 ---
 
 # opal-mirror Skill
 
-Use this skill to initialize a local Agent with the user's existing web LLM chat history, then optionally import those conversations into terminal Codex `/resume`.
+Use this skill to initialize a local Agent with the user's existing web LLM chat history, then optionally import those conversations into terminal Codex `/resume` and Codex App sessions.
 
 The skill is intentionally lightweight for skill-hub distribution: it ships the onboarding/helper wrapper and the approved CDP proxy, then clones/updates the real `opal-mirror` repo during first-run bootstrap. Use `/Users/va7/Desktop/opal-mirror` when that dev clone exists; otherwise the product install path is `~/.local/share/opal-mirror`.
 
@@ -18,7 +18,7 @@ Treat opal-mirror as an Agent initialization workflow, not as a generic export t
 
 The intended user outcome is:
 
-> A newly installed local Agent can read or resume the user's previous web LLM conversations, so it can understand what the user has been doing and what context already exists.
+> A newly installed local Agent can read or resume the user's previous web LLM conversations across terminal Codex and Codex App, so it can understand what the user has been doing and what context already exists.
 
 Avoid turning the workflow into README narration. Prefer operating the tool and reporting concise status.
 
@@ -74,6 +74,13 @@ scripts/opal_mirror_skill.sh import-codex-limited chatgpt 20
 ```
 
 Never run an unbounded sync from the skill wrapper. This skill is not a background auto-sync daemon; every sync/import is manually triggered by the user or by an agent acting on an explicit user request.
+
+Codex import writes two local mirrors for each web chat:
+
+- `source=cli` for terminal Codex `/resume`.
+- `source=vscode` for Codex App sidebar/search.
+
+Both mirrors preserve the original web-chat session times in SQLite, rollout JSONL timestamps, rollout file mtimes, and Codex App thread-id time prefixes. Imported titles use `[webchat:<platform>]` so they can be distinguished from native Codex App conversations.
 
 ## Standard Workflow
 
@@ -142,7 +149,15 @@ For normal user requests, run the complete import workflow. For example, if the 
 scripts/opal_mirror_skill.sh import-codex-limited chatgpt 20
 ```
 
-This runs `doctor`, limited `sync`, `index`, limited `export-codex`, then verifies recent `/resume` rows. It writes mirrored chats to `/Users/va7/Desktop/opal-mirror/ai-chat-archive` by default, unless `AI_CHAT_ARCHIVE_DIR` is already set.
+This runs `doctor`, limited `sync`, `index`, limited `export-codex`, repairs Codex App frontend state when possible, then verifies recent `/resume` rows. It writes mirrored chats to `/Users/va7/Desktop/opal-mirror/ai-chat-archive` by default, unless `AI_CHAT_ARCHIVE_DIR` is already set.
+
+If Codex App is running, sidebar registry repair is deferred because the app can overwrite external global-state edits on shutdown. In that case, fully quit Codex App and run:
+
+```bash
+scripts/opal_mirror_skill.sh repair-codex-app --codex-home ~/.codex
+```
+
+The repair command also fixes Codex App rollout mtimes from SQLite `updated_at_ms`, so App-side imported sessions sort by the original web-chat time instead of import time.
 
 Build or refresh the readable index:
 
@@ -150,7 +165,7 @@ Build or refresh the readable index:
 scripts/opal_mirror_skill.sh index
 ```
 
-For terminal Codex `/resume` import, run:
+For terminal Codex `/resume` plus Codex App import, run:
 
 ```bash
 scripts/opal_mirror_skill.sh export-codex all --codex-home ~/.codex --cwd ~

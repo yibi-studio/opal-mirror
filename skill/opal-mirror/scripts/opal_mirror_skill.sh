@@ -33,6 +33,7 @@ Usage:
   opal_mirror_skill.sh import-codex-limited [all|claude|chatgpt|gemini|deepseek|doubao|qwen] N [export flags...]
   opal_mirror_skill.sh index
   opal_mirror_skill.sh export-codex [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [export flags...]
+  opal_mirror_skill.sh repair-codex-app [--codex-home DIR] [repair flags...]
   opal_mirror_skill.sh bootstrap-codex [all|claude|chatgpt|gemini|deepseek|doubao|qwen] --limit N [export flags...]
   opal_mirror_skill.sh status
 
@@ -358,6 +359,12 @@ verify_resume_rows() {
   fi
 }
 
+repair_codex_app_frontend() {
+  codex_home="${1:-$HOME/.codex}"
+  shift || true
+  run_node repair_codex_app_frontend.mjs --codex-home "$codex_home" "$@"
+}
+
 command="${1:-help}"
 shift || true
 
@@ -399,6 +406,7 @@ EOF
     fi
     ;;
   doctor)
+    target="${1:-all}"
     ensure_repo_or_install
     ensure_cdp_ready
     (cd "$LOCAL_REPO" && OPAL_MIRROR_REQUIRE_TARGET="$target" node doctor.mjs)
@@ -468,6 +476,9 @@ EOF
     fi
     export_args+=("$@")
     run_node export_codex.mjs "${export_args[@]}"
+    echo
+    echo "[repair] Codex App sidebar registry:"
+    repair_codex_app_frontend "$(codex_home_from_args "$@")" || true
     if [[ "$target" != "all" ]]; then
       echo
       echo "[verify] recent /resume rows for ${target}:"
@@ -482,6 +493,12 @@ EOF
     require_specific_import_target "$target"
     if [[ $# -gt 0 ]]; then shift; fi
     run_node export_codex.mjs "$target" "$@"
+    echo
+    echo "[repair] Codex App sidebar registry:"
+    repair_codex_app_frontend "$(codex_home_from_args "$@")" || true
+    ;;
+  repair-codex-app)
+    repair_codex_app_frontend "$(codex_home_from_args "$@")" "$@"
     ;;
   bootstrap-codex)
     ensure_repo_or_install
@@ -498,6 +515,9 @@ EOF
     fi
     run_node build_index.mjs
     run_node export_codex.mjs "$target" "$@"
+    echo
+    echo "[repair] Codex App sidebar registry:"
+    repair_codex_app_frontend "$(codex_home_from_args "$@")" || true
     ;;
   *)
     echo "Unknown command: $command" >&2

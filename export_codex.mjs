@@ -20,8 +20,11 @@ const target = positionalArgs()[0] || 'all';
 const archiveRoot = path.resolve(readFlag('--archive') || process.env.AI_CHAT_ARCHIVE_DIR || path.join(__dirname, 'ai-chat-archive'));
 const codexHome = path.resolve(readFlag('--codex-home') || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
 const codexCwd = path.resolve(readFlag('--cwd') || process.env.CODEX_IMPORT_CWD || path.join(codexHome, 'webchat-imports'));
+const codexAppCwd = path.join(os.homedir(), 'Documents', 'Codex');
 const noState = args.includes('--no-state');
+const noAppState = args.includes('--no-app-state');
 const noLegacyIndex = args.includes('--no-legacy-index');
+const resetAppIds = args.includes('--reset-app-ids');
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
 const importLimit = readPositiveIntFlag('--limit');
@@ -30,7 +33,7 @@ if (help) {
   console.log(`Import mirrored web chat archive into Codex /resume.
 
 Usage:
-  node export_codex.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [--archive DIR] [--codex-home DIR] [--cwd DIR] [--limit N] [--no-state] [--no-legacy-index] [--dry-run]
+  node export_codex.mjs [all|claude|chatgpt|gemini|deepseek|doubao|qwen] [--archive DIR] [--codex-home DIR] [--cwd DIR] [--limit N] [--no-state] [--no-app-state] [--reset-app-ids] [--no-legacy-index] [--dry-run]
 
 Defaults:
   archive:    ${archiveRoot}
@@ -45,10 +48,17 @@ bind imported web chats to a specific local workspace.
 What it writes:
   - Codex rollout files under <codex-home>/sessions/YYYY/MM/DD/
   - <codex-home>/state_5.sqlite threads rows, unless --no-state is set
+  - App-compatible mirror threads and sidebar registry, unless --no-state or --no-app-state is set.
+    If Codex App is currently running against the real ~/.codex home, sidebar
+    registry repair is deferred so the app cannot overwrite it on shutdown.
   - legacy session_index.jsonl/history.jsonl rows, unless --no-legacy-index is set
 
 The importer preserves original web-chat timestamps and file mtimes, so /resume
 sorts these sessions by when they happened on the web, not by import time.
+
+Use --reset-app-ids to rebuild Codex App mirror thread ids for the selected
+target and remove the old App ids from the frontend registry. Terminal Codex ids
+remain stable.
 `);
   process.exit(0);
 }
@@ -124,6 +134,77 @@ function uuidV5(name, namespace = '6ba7b811-9dad-11d1-80b4-00c04fd430c8') {
   hash[8] = (hash[8] & 0x3f) | 0x80;
   const hex = hash.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function uuidV7Like(ms = Date.now(), entropy = crypto.randomBytes(10).toString('hex')) {
+  const timestampHex = BigInt(ms).toString(16).padStart(12, '0').slice(-12);
+  const hash = crypto.createHash('sha1').update(String(entropy)).digest('hex');
+  return `${timestampHex.slice(0, 8)}-${timestampHex.slice(8, 12)}-7000-8000-${hash.slice(0, 12)}`;
+}
+
+function appThreadMapPath() {
+  return path.join(archiveRoot, '_codex_app_thread_ids.json');
+}
+
+async function loadAppThreadMap() {
+  try {
+    return JSON.parse(await fs.readFile(appThreadMapPath(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function pruneResetAppThreadMap(map, sessions) {
+  if (!resetAppIds) return {};
+  const previous = {};
+  for (const session of sessions) {
+    const webchatId = `webchat:${session.platform}:${session.id}`;
+    if (map[webchatId]) previous[webchatId] = map[webchatId];
+    delete map[webchatId];
+  }
+  return previous;
+}
+
+async function saveAppThreadMap(map) {
+  if (dryRun || noAppState) return;
+  const file = appThreadMapPath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+}
+
+function appThreadIdFor(webchatId, map, firstIso) {
+  if (map[webchatId]) return map[webchatId];
+  const ms = Date.parse(firstIso);
+  const id = uuidV7Like(Number.isNaN(ms) ? Date.now() : ms);
+  map[webchatId] = id;
+  return id;
+}
+
+function appOutputDirFor(threadId) {
+  return path.join(codexAppCwd, 'webchat-imports', threadId, 'outputs');
+}
+
+function isRealCodexHome() {
+  if (process.env.OPAL_MIRROR_ASSUME_REAL_CODEX_HOME === '1') return true;
+  if (process.env.OPAL_MIRROR_ASSUME_REAL_CODEX_HOME === '0') return false;
+  return path.resolve(codexHome) === path.resolve(path.join(os.homedir(), '.codex'));
+}
+
+function codexAppIsRunning() {
+  if (process.env.OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING === '1') return true;
+  if (process.env.OPAL_MIRROR_ASSUME_CODEX_APP_RUNNING === '0') return false;
+  const ps = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' });
+  if (ps.status !== 0) return false;
+  return ps.stdout.split('\n').some(line => (
+    line.includes('/Applications/Codex.app/Contents/MacOS/Codex')
+    || line.includes('/Applications/Codex.app/Contents/Resources/codex app-server')
+  ));
+}
+
+function shouldDeferAppFrontendWrite() {
+  if (process.env.OPAL_MIRROR_ALLOW_RUNNING_CODEX_APP === '1') return false;
+  if (args.includes('--allow-running-app-state')) return false;
+  return isRealCodexHome() && codexAppIsRunning();
 }
 
 function rolloutPathFor(sessionId, firstIso) {
@@ -476,7 +557,7 @@ function groupTurns(turns) {
   return groups.filter(g => g.user);
 }
 
-async function writeCodexSession(session) {
+async function writeCodexSession(session, appThreadMap) {
   const groups = groupTurns(session.turns);
   if (!groups.length) return { written: false, reason: 'no_user_turn' };
   const firstIso = groups[0].user.ts || session.startedAt || new Date().toISOString();
@@ -486,23 +567,27 @@ async function writeCodexSession(session) {
   const id = uuidV5(`webchat:${session.platform}:${session.id}`);
   const webchatId = `webchat:${session.platform}:${session.id}`;
   const title = displayTitle(session);
+  const appId = appThreadIdFor(webchatId, appThreadMap, firstIso);
   const file = rolloutPathFor(id, firstIso);
+  const appFile = rolloutPathFor(appId, firstIso);
   const lines = [];
 
   if (!dryRun) {
-    await removeOldRolloutsForWebchat(webchatId, file);
+    await removeOldRolloutsForWebchat(webchatId, new Set([file, appFile]));
   }
 
-  lines.push(jsonLine({
+  const buildLines = ({ threadId, cwd, originator, source, cliVersion, mirrorTarget }) => {
+    const out = [];
+    out.push(jsonLine({
     timestamp: firstIso,
     type: 'session_meta',
     payload: {
-      id,
+      id: threadId,
       timestamp: firstIso,
-      cwd: codexCwd,
-      originator: 'codex-tui',
-      cli_version: '0.135.0',
-      source: 'cli',
+      cwd,
+      originator,
+      cli_version: cliVersion,
+      source,
       thread_source: 'user',
       model_provider: 'metana',
       model: 'gpt-5.5',
@@ -512,109 +597,137 @@ async function writeCodexSession(session) {
         raw_ref: session.sourceFile,
         platform: session.platform,
         imported_by: 'opal-mirror',
+        mirror_target: mirrorTarget,
         timestamp_confidence: session.timestampConfidence || 'source',
         url: session.url || '',
       },
     },
-  }));
+    }));
 
-  for (let i = 0; i < groups.length; i++) {
-    const group = groups[i];
-    const turnId = i === 0 ? id : uuidV5(`${id}:${i + 1}`);
-    const userTs = group.user.ts || new Date(Date.parse(firstIso) + i * 1000).toISOString();
-    const startedAt = epochSeconds(userTs);
-    lines.push(jsonLine({
-      timestamp: userTs,
-      type: 'event_msg',
-      payload: {
-        type: 'task_started',
-        turn_id: turnId,
-        started_at: startedAt,
-        model_context_window: 258400,
-        collaboration_mode_kind: 'default',
-      },
-    }));
-    lines.push(jsonLine({
-      timestamp: userTs,
-      type: 'event_msg',
-      payload: {
-        type: 'user_message',
-        message: group.user.text,
-        images: [],
-        local_images: [],
-        text_elements: [],
-        turn_id: turnId,
-      },
-    }));
-    lines.push(jsonLine({
-      timestamp: userTs,
-      type: 'turn_context',
-      payload: {
-        turn_id: turnId,
-        cwd: codexCwd,
-        current_date: userTs.slice(0, 10),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-        approval_policy: 'never',
-        sandbox_policy: { type: 'danger-full-access' },
-        permission_profile: { type: 'disabled' },
-        model: 'gpt-5.5',
-      },
-    }));
-    lines.push(jsonLine(responseItem('user', group.user.text, userTs)));
-
-    let completeTs = userTs;
-    let lastAgentMessage = 'Imported web chat session';
-    for (const a of group.assistants) {
-      const assistantTs = a.ts || completeTs;
-      completeTs = assistantTs;
-      lastAgentMessage = a.text;
-      lines.push(jsonLine({
-        timestamp: assistantTs,
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      const turnId = i === 0 ? threadId : uuidV5(`${threadId}:${i + 1}`);
+      const userTs = group.user.ts || new Date(Date.parse(firstIso) + i * 1000).toISOString();
+      const startedAt = epochSeconds(userTs);
+      out.push(jsonLine({
+        timestamp: userTs,
         type: 'event_msg',
         payload: {
-          type: 'agent_message',
-          message: a.text,
-          phase: 'final_answer',
-          memory_citation: null,
+          type: 'task_started',
+          turn_id: turnId,
+          started_at: startedAt,
+          model_context_window: 258400,
+          collaboration_mode_kind: 'default',
         },
       }));
-      lines.push(jsonLine(responseItem('assistant', a.text, assistantTs)));
+      out.push(jsonLine({
+        timestamp: userTs,
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: group.user.text,
+          images: [],
+          local_images: [],
+          text_elements: [],
+          turn_id: turnId,
+        },
+      }));
+      out.push(jsonLine({
+        timestamp: userTs,
+        type: 'turn_context',
+        payload: {
+          turn_id: turnId,
+          cwd,
+          current_date: userTs.slice(0, 10),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          approval_policy: 'never',
+          sandbox_policy: { type: 'danger-full-access' },
+          permission_profile: { type: 'disabled' },
+          model: 'gpt-5.5',
+        },
+      }));
+      out.push(jsonLine(responseItem('user', group.user.text, userTs)));
+
+      let completeTs = userTs;
+      let lastAgentMessage = 'Imported web chat session';
+      for (const a of group.assistants) {
+        const assistantTs = a.ts || completeTs;
+        completeTs = assistantTs;
+        lastAgentMessage = a.text;
+        out.push(jsonLine({
+          timestamp: assistantTs,
+          type: 'event_msg',
+          payload: {
+            type: 'agent_message',
+            message: a.text,
+            phase: 'final_answer',
+            memory_citation: null,
+          },
+        }));
+        out.push(jsonLine(responseItem('assistant', a.text, assistantTs)));
+      }
+      out.push(jsonLine({
+        timestamp: completeTs,
+        type: 'event_msg',
+        payload: {
+          type: 'task_complete',
+          turn_id: turnId,
+          last_agent_message: lastAgentMessage.slice(0, 4000),
+          completed_at: epochSeconds(completeTs),
+        },
+      }));
     }
-    lines.push(jsonLine({
-      timestamp: completeTs,
-      type: 'event_msg',
-      payload: {
-        type: 'task_complete',
-        turn_id: turnId,
-        last_agent_message: lastAgentMessage.slice(0, 4000),
-        completed_at: epochSeconds(completeTs),
-      },
-    }));
-  }
+    return out;
+  };
+
+  lines.push(...buildLines({
+    threadId: id,
+    cwd: codexCwd,
+    originator: 'codex-tui',
+    source: 'cli',
+    cliVersion: '0.135.0',
+    mirrorTarget: 'terminal',
+  }));
+  const appLines = buildLines({
+    threadId: appId,
+    cwd: codexAppCwd,
+    originator: 'Codex Desktop',
+    source: 'vscode',
+    cliVersion: '0.135.0',
+    mirrorTarget: 'codex_app',
+  });
 
   if (!dryRun) {
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, lines.join(''), 'utf8');
+    if (!noAppState) {
+      await fs.mkdir(path.dirname(appFile), { recursive: true });
+      await fs.writeFile(appFile, appLines.join(''), 'utf8');
+    }
     const ts = epochSeconds(lastIso);
     await fs.utimes(file, ts, ts);
+    if (!noAppState) await fs.utimes(appFile, ts, ts);
   }
 
   return {
     written: true,
     id,
+    appId,
     webchatId,
     title,
     file,
+    appFile,
     firstIso,
     lastIso,
     groups: groups.length,
     assistantMessages: groups.reduce((sum, g) => sum + g.assistants.length, 0),
     firstUserMessage: groups[0].user.text,
     model: session.model || session.platform,
+    variants: noAppState ? ['terminal'] : ['terminal', 'app'],
   };
 }
 
-async function removeOldRolloutsForWebchat(webchatId, keepFile) {
+async function removeOldRolloutsForWebchat(webchatId, keepFiles) {
   const root = path.join(codexHome, 'sessions');
   const files = [];
   async function walk(dir) {
@@ -629,7 +742,7 @@ async function removeOldRolloutsForWebchat(webchatId, keepFile) {
   }
   await walk(root);
   for (const f of files) {
-    if (path.resolve(f) === path.resolve(keepFile)) continue;
+    if ([...keepFiles].some(keep => path.resolve(f) === path.resolve(keep))) continue;
     const existingId = await webchatIdFromRollout(f);
     if (existingId === webchatId) await fs.rm(f, { force: true });
   }
@@ -641,7 +754,7 @@ function sqlValue(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-async function registerState(rows) {
+async function registerState(rows, staleAppIdsByWebchat = {}) {
   if (noState || dryRun || !rows.length) return { skipped: true, reason: noState ? '--no-state' : dryRun ? '--dry-run' : 'no_rows' };
   const db = path.join(codexHome, 'state_5.sqlite');
   if (!fsSync.existsSync(db)) return { skipped: true, reason: `missing ${db}` };
@@ -657,12 +770,18 @@ async function registerState(rows) {
     throw new Error(`sqlite3 backup failed: ${backupResult.stderr || backupResult.stdout}`);
   }
 
-  const duplicateIds = await findDuplicateThreadIds(db, rows);
+  const stateRows = rows.flatMap(stateRowsForImport);
+  const duplicateIds = [
+    ...new Set([
+      ...await findDuplicateThreadIds(db, stateRows),
+      ...Object.values(staleAppIdsByWebchat).filter(Boolean),
+    ]),
+  ];
   const statements = ['BEGIN;'];
   for (const id of duplicateIds) {
     statements.push(`DELETE FROM threads WHERE id=${sqlValue(id)};`);
   }
-  for (const r of rows) {
+  for (const r of stateRows) {
     const created = epochSeconds(r.firstIso);
     const updated = epochSeconds(r.lastIso);
     const first = r.firstUserMessage.slice(0, 4000);
@@ -672,9 +791,9 @@ async function registerState(rows) {
       r.file,
       created,
       updated,
-      'cli',
+      r.source,
       'metana',
-      codexCwd,
+      r.cwd,
       r.title,
       JSON.stringify({ type: 'disabled' }),
       'never',
@@ -685,7 +804,7 @@ async function registerState(rows) {
       null,
       null,
       null,
-      '0.135.0',
+      r.cliVersion,
       first,
       null,
       null,
@@ -740,8 +859,109 @@ ON CONFLICT(id) DO UPDATE SET
   return { skipped: false, backup, pruned: duplicateIds.length };
 }
 
+function stateRowsForImport(r) {
+  const rows = [{
+    ...r,
+    source: 'cli',
+    cwd: codexCwd,
+    cliVersion: '0.135.0',
+  }];
+  if (!noAppState && r.appId && r.appFile) {
+    rows.push({
+      ...r,
+      id: r.appId,
+      file: r.appFile,
+      source: 'vscode',
+      cwd: codexAppCwd,
+      cliVersion: '0.135.0',
+    });
+  }
+  return rows;
+}
+
+async function registerAppFrontendState(rows, staleAppIdsByWebchat = {}) {
+  if (noState || noAppState || dryRun || !rows.length) {
+    return { skipped: true, reason: noState ? '--no-state' : noAppState ? '--no-app-state' : dryRun ? '--dry-run' : 'no_rows' };
+  }
+  if (shouldDeferAppFrontendWrite()) {
+    return {
+      skipped: true,
+      deferred: true,
+      reason: 'Codex App is running; sidebar registry repair deferred until the app fully quits',
+    };
+  }
+
+  const appRows = rows
+    .filter(r => r.appId)
+    .map(r => ({ ...r, id: r.appId, cwd: codexAppCwd, outputDir: appOutputDirFor(r.appId) }));
+  if (!appRows.length) return { skipped: true, reason: 'no_app_rows' };
+
+  const file = path.join(codexHome, '.codex-global-state.json');
+  let state = {};
+  try {
+    state = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+
+  const backup = fsSync.existsSync(file)
+    ? path.join(codexHome, `.codex-global-state.json.backup-before-opal-mirror-import-${timestampForFile(new Date())}`)
+    : null;
+  if (backup) await fs.copyFile(file, backup);
+
+  const projectless = Array.isArray(state['projectless-thread-ids']) ? state['projectless-thread-ids'] : [];
+  const imported = new Set(appRows.map(r => r.id));
+  const stale = new Set(Object.values(staleAppIdsByWebchat).filter(Boolean));
+  const existingWithoutImports = projectless.filter(id => !imported.has(id) && !stale.has(id));
+  state['projectless-thread-ids'] = [...existingWithoutImports, ...appRows.map(r => r.id)];
+
+  const hints = state['thread-workspace-root-hints'] && typeof state['thread-workspace-root-hints'] === 'object'
+    ? state['thread-workspace-root-hints']
+    : {};
+  const outputDirs = state['thread-projectless-output-directories'] && typeof state['thread-projectless-output-directories'] === 'object'
+    ? state['thread-projectless-output-directories']
+    : {};
+  state['thread-workspace-root-hints'] = hints;
+  state['thread-projectless-output-directories'] = outputDirs;
+
+  const atomState = state['electron-persisted-atom-state'] && typeof state['electron-persisted-atom-state'] === 'object'
+    ? state['electron-persisted-atom-state']
+    : {};
+  state['electron-persisted-atom-state'] = atomState;
+  const permissions = atomState['heartbeat-thread-permissions-by-id'] && typeof atomState['heartbeat-thread-permissions-by-id'] === 'object'
+    ? atomState['heartbeat-thread-permissions-by-id']
+    : {};
+  atomState['heartbeat-thread-permissions-by-id'] = permissions;
+
+  for (const id of stale) {
+    delete hints[id];
+    delete outputDirs[id];
+    delete permissions[id];
+  }
+
+  for (const r of appRows) {
+    hints[r.id] = r.cwd;
+    outputDirs[r.id] = r.outputDir;
+    permissions[r.id] = {
+      activePermissionProfile: { id: ':danger-full-access', extends: null },
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+    };
+    await fs.mkdir(r.outputDir, { recursive: true });
+  }
+
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(state)}\n`, 'utf8');
+  return { skipped: false, file, backup, registered: appRows.length };
+}
+
 async function findDuplicateThreadIds(db, rows) {
-  const wanted = new Map(rows.map(r => [r.webchatId, r.id]));
+  const wanted = new Map();
+  for (const r of rows) {
+    if (!wanted.has(r.webchatId)) wanted.set(r.webchatId, new Set());
+    wanted.get(r.webchatId).add(r.id);
+  }
   if (!wanted.size) return [];
   const query = "select id, rollout_path from threads where title like '[webchat:%'";
   const result = spawnSync('sqlite3', [db, '-json', query], { encoding: 'utf8' });
@@ -751,8 +971,8 @@ async function findDuplicateThreadIds(db, rows) {
   const duplicates = [];
   for (const row of existing) {
     const webchatId = await webchatIdFromRollout(row.rollout_path);
-    const canonicalId = wanted.get(webchatId);
-    if (canonicalId && row.id !== canonicalId) duplicates.push(row.id);
+    const canonicalIds = wanted.get(webchatId);
+    if (canonicalIds && !canonicalIds.has(row.id)) duplicates.push(row.id);
   }
   return duplicates;
 }
@@ -846,12 +1066,14 @@ async function loadSessions() {
 async function main() {
   const sessions = await loadSessions();
   if (!dryRun) await fs.mkdir(codexHome, { recursive: true });
+  const appThreadMap = await loadAppThreadMap();
+  const staleAppIdsByWebchat = pruneResetAppThreadMap(appThreadMap, sessions);
   const rows = [];
   const summary = {};
   for (const s of sessions) {
     summary[s.platform] ||= { discovered: 0, written: 0, skipped: 0, turns: 0, assistantMessages: 0 };
     summary[s.platform].discovered++;
-    const row = await writeCodexSession(s);
+    const row = await writeCodexSession(s, appThreadMap);
     if (!row.written) {
       summary[s.platform].skipped++;
       if (verbose) console.log(`skip ${s.platform}:${s.id} ${row.reason}`);
@@ -863,13 +1085,20 @@ async function main() {
     summary[s.platform].assistantMessages += row.assistantMessages;
   }
 
-  const state = await registerState(rows);
+  await saveAppThreadMap(appThreadMap);
+  const state = await registerState(rows, staleAppIdsByWebchat);
+  const appFrontend = await registerAppFrontendState(rows, staleAppIdsByWebchat);
   const legacy = await appendLegacyIndexes(rows);
   console.log(`${dryRun ? 'would write' : 'wrote'} Codex sessions under ${path.join(codexHome, 'sessions')}`);
   for (const [platform, s] of Object.entries(summary)) {
     console.log(`${platform}: discovered=${s.discovered}, written=${s.written}, skipped=${s.skipped}, turns=${s.turns}, assistant_messages=${s.assistantMessages}`);
   }
   console.log(`state: ${state.skipped ? `skipped (${state.reason})` : `updated (backup ${state.backup})`}`);
+  console.log(`app frontend: ${appFrontend.skipped ? `skipped (${appFrontend.reason})` : `registered ${appFrontend.registered} thread(s) (backup ${appFrontend.backup || 'none'})`}`);
+  if (appFrontend.deferred) {
+    console.log(`app frontend: run node ${path.join(__dirname, 'repair_codex_app_frontend.mjs')} --archive ${archiveRoot} --codex-home ${codexHome} after fully quitting Codex App`);
+  }
+  if (Object.keys(staleAppIdsByWebchat).length) console.log(`app frontend: reset ${Object.keys(staleAppIdsByWebchat).length} stale App mirror id(s)`);
   if (!state.skipped && state.pruned) console.log(`state: pruned ${state.pruned} duplicate imported thread row(s)`);
   console.log(`legacy index: ${legacy.skipped ? 'skipped' : 'updated'}`);
 }
